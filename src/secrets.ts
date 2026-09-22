@@ -5,7 +5,7 @@ import {randomUUID} from 'node:crypto';
 
 function defaultPath(): string {
 	const base = process.env.XDG_CONFIG_HOME || join(homedir(), '.config');
-	return join(base, 'claude-proxy-manager', 'secrets.json');
+	return join(base, 'cpm', 'secrets.json');
 }
 
 export class SecretStore {

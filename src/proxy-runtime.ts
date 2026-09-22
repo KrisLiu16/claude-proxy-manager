@@ -1,0 +1,455 @@
+import {spawn} from 'node:child_process';
+import {randomBytes} from 'node:crypto';
+import {constants as fsConstants} from 'node:fs';
+import {access, chmod, mkdir, readFile, realpath, rm, writeFile} from 'node:fs/promises';
+import net, {type Socket} from 'node:net';
+import {homedir} from 'node:os';
+import {basename, dirname, join} from 'node:path';
+import tls from 'node:tls';
+import {domainToASCII} from 'node:url';
+import {statusSummary, type CheckItem, type CheckState} from './types.js';
+import {VERSION} from './version.js';
+
+const DEFAULT_PORT = 17_891;
+const DEFAULT_TIMEZONE = 'America/Los_Angeles';
+const DEFAULT_LOCALE = 'en_US.UTF-8';
+const HTTP_OK = new Set([200, 400, 401, 403, 404, 405]);
+
+export type RuntimeConfig = {
+	proxyUrl: string;
+	noProxy: string;
+	claudeBin: string;
+	timezone: string;
+	locale: string;
+	claudeConfigDir: string;
+	httpPort: number;
+};
+
+function configPath(): string {
+	return process.env.CPM_PROXY_CONFIG || join(homedir(), '.config', 'cpm', 'proxy.env');
+}
+
+function stateDir(): string {
+	return join(process.env.XDG_STATE_HOME || join(homedir(), '.local', 'state'), 'cpm');
+}
+
+function pidPath(port: number): string {
+	return join(stateDir(), `bridge-${port}.pid`);
+}
+
+function logPath(port: number): string {
+	return join(stateDir(), `bridge-${port}.log`);
+}
+
+export async function readRuntimeConfig(): Promise<RuntimeConfig> {
+	const values = new Map<string, string>();
+	try {
+		for (const raw of (await readFile(configPath(), 'utf8')).split(/\r?\n/)) {
+			const line = raw.trim();
+			if (!line || line.startsWith('#')) continue;
+			const index = line.indexOf('=');
+			if (index > 0) values.set(line.slice(0, index).trim(), line.slice(index + 1).trim());
+		}
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+	}
+	const proxyUrl = process.env.CPM_SOCKS5_PROXY || process.env.SOCKS5_PROXY || values.get('SOCKS5_PROXY') || '';
+	const portText = process.env.CPM_HTTP_PORT || values.get('HTTP_PORT') || String(DEFAULT_PORT);
+	return {
+		proxyUrl,
+		noProxy: process.env.CPM_NO_PROXY ?? values.get('NO_PROXY') ?? '',
+		claudeBin: process.env.CLAUDE_BIN || values.get('CLAUDE_BIN') || '',
+		timezone: process.env.CPM_TZ || values.get('TZ') || DEFAULT_TIMEZONE,
+		locale: process.env.CPM_LANG || values.get('LANG') || DEFAULT_LOCALE,
+		claudeConfigDir: process.env.CLAUDE_CONFIG_DIR || values.get('CLAUDE_CONFIG_DIR') || '',
+		httpPort: Number(portText),
+	};
+}
+
+function parseProxy(proxyUrl: string): URL {
+	let parsed: URL;
+	try { parsed = new URL(proxyUrl); } catch { throw new Error('SOCKS5_PROXY 格式无效'); }
+	if (!['socks5:', 'socks5h:'].includes(parsed.protocol) || !parsed.hostname || !parsed.port) {
+		throw new Error('SOCKS5_PROXY 必须是 socks5h://USER:PASS@HOST:PORT');
+	}
+	return parsed;
+}
+
+class SocketReader {
+	private data = Buffer.alloc(0);
+	private waiting: (() => void) | undefined;
+	private failure: Error | undefined;
+	public constructor(private readonly socket: Socket) {
+		socket.on('data', chunk => {
+			this.data = Buffer.concat([this.data, Buffer.from(chunk)]);
+			this.waiting?.();
+		});
+		socket.on('error', error => { this.failure = error; this.waiting?.(); });
+		socket.on('end', () => { this.failure = new Error('SOCKS5 连接意外关闭'); this.waiting?.(); });
+	}
+	public async exact(size: number): Promise<Buffer> {
+		while (this.data.length < size) {
+			if (this.failure) throw this.failure;
+			await new Promise<void>(resolve => { this.waiting = resolve; });
+			this.waiting = undefined;
+		}
+		const result = this.data.subarray(0, size);
+		this.data = this.data.subarray(size);
+		return result;
+	}
+}
+
+function connectTcp(host: string, port: number, timeoutMs = 8_000): Promise<Socket> {
+	return new Promise((resolve, reject) => {
+		const socket = net.createConnection({host, port});
+		const timer = setTimeout(() => socket.destroy(new Error(`连接 ${host}:${port} 超时`)), timeoutMs);
+		socket.once('connect', () => { clearTimeout(timer); resolve(socket); });
+		socket.once('error', error => { clearTimeout(timer); reject(error); });
+	});
+}
+
+export async function socksConnect(proxyUrl: string, targetHost: string, targetPort: number): Promise<Socket> {
+	const proxy = parseProxy(proxyUrl);
+	const socket = await connectTcp(proxy.hostname.replace(/^\[|\]$/g, ''), Number(proxy.port), 12_000);
+	const reader = new SocketReader(socket);
+	try {
+		const username = decodeURIComponent(proxy.username);
+		const password = decodeURIComponent(proxy.password);
+		const user = Buffer.from(username);
+		const pass = Buffer.from(password);
+		if (user.length > 255 || pass.length > 255) throw new Error('SOCKS5 用户名或密码过长');
+		socket.write(username || password ? Buffer.from([5, 1, 2]) : Buffer.from([5, 1, 0]));
+		const negotiation = await reader.exact(2);
+		if (negotiation[0] !== 5 || negotiation[1] === 255) throw new Error('SOCKS5 不支持所需认证方式');
+		if (negotiation[1] === 2) {
+			socket.write(Buffer.concat([Buffer.from([1, user.length]), user, Buffer.from([pass.length]), pass]));
+			const auth = await reader.exact(2);
+			if (auth[1] !== 0) throw new Error('SOCKS5 用户名或密码被拒绝');
+		} else if (negotiation[1] !== 0) {
+			throw new Error(`SOCKS5 返回未知认证方式 ${negotiation[1]}`);
+		}
+		const host = Buffer.from(domainToASCII(targetHost) || targetHost, 'ascii');
+		if (host.length > 255) throw new Error('目标域名过长');
+		socket.write(Buffer.concat([Buffer.from([5, 1, 0, 3, host.length]), host, Buffer.from([targetPort >> 8, targetPort & 255])]));
+		const response = await reader.exact(4);
+		if (response[1] !== 0) throw new Error(`SOCKS5 CONNECT 失败，状态 ${response[1]}`);
+		const addressSize = response[3] === 1 ? 4 : response[3] === 4 ? 16 : response[3] === 3 ? (await reader.exact(1))[0]! : 0;
+		if (!addressSize) throw new Error('SOCKS5 返回未知地址类型');
+		await reader.exact(addressSize + 2);
+		socket.removeAllListeners('data');
+		socket.setTimeout(0);
+		return socket;
+	} catch (error) {
+		socket.destroy();
+		throw error;
+	}
+}
+
+type HttpResult = {status: number; body: string};
+
+async function httpsRequest(host: string, path: string, socket?: Socket): Promise<HttpResult> {
+	return await new Promise((resolve, reject) => {
+		const secure = tls.connect({host, port: 443, socket, servername: host, rejectUnauthorized: true});
+		const timer = setTimeout(() => secure.destroy(new Error(`HTTPS ${host} 超时`)), 20_000);
+		const chunks: Buffer[] = [];
+		secure.once('secureConnect', () => {
+			secure.write(`GET ${path} HTTP/1.1\r\nHost: ${host}\r\nUser-Agent: cpm/${VERSION}\r\nConnection: close\r\n\r\n`);
+		});
+		secure.on('data', chunk => chunks.push(Buffer.from(chunk)));
+		secure.once('error', error => { clearTimeout(timer); reject(error); });
+		secure.once('end', () => {
+			clearTimeout(timer);
+			const raw = Buffer.concat(chunks).toString('utf8');
+			const [head = '', ...body] = raw.split('\r\n\r\n');
+			const status = Number(head.match(/^HTTP\/\S+\s+(\d+)/)?.[1] || 0);
+			resolve({status, body: body.join('\r\n\r\n').trim()});
+		});
+	});
+}
+
+async function httpProxyConnect(port: number, targetHost: string, targetPort: number): Promise<Socket> {
+	const socket = await connectTcp('127.0.0.1', port, 3_000);
+	return await new Promise((resolve, reject) => {
+		let response = Buffer.alloc(0);
+		const timer = setTimeout(() => socket.destroy(new Error('HTTP bridge CONNECT 超时')), 8_000);
+		const cleanup = () => { clearTimeout(timer); socket.off('data', onData); socket.off('error', onError); };
+		const onError = (error: Error) => { cleanup(); reject(error); };
+		const onData = (chunk: Buffer) => {
+			response = Buffer.concat([response, chunk]);
+			const end = response.indexOf('\r\n\r\n');
+			if (end < 0) return;
+			cleanup();
+			const status = Number(response.subarray(0, end).toString('latin1').match(/^HTTP\/\S+\s+(\d+)/)?.[1] || 0);
+			if (status !== 200) { socket.destroy(); reject(new Error(`HTTP bridge CONNECT 返回 ${status || '无效响应'}`)); return; }
+			resolve(socket);
+		};
+		socket.on('data', onData);
+		socket.once('error', onError);
+		socket.write(`CONNECT ${targetHost}:${targetPort} HTTP/1.1\r\nHost: ${targetHost}:${targetPort}\r\n\r\n`);
+	});
+}
+
+async function bridgedHttps(port: number, host: string, path: string): Promise<HttpResult> {
+	return httpsRequest(host, path, await httpProxyConnect(port, host, 443));
+}
+
+function splitHostPort(value: string, fallback: number): [string, number] {
+	if (value.startsWith('[')) {
+		const end = value.indexOf(']');
+		if (end < 0) throw new Error('CONNECT 地址无效');
+		return [value.slice(1, end), Number(value.slice(end + 2) || fallback)];
+	}
+	const index = value.lastIndexOf(':');
+	return index > 0 ? [value.slice(0, index), Number(value.slice(index + 1))] : [value, fallback];
+}
+
+async function readHttpHead(client: Socket): Promise<{head: Buffer; rest: Buffer}> {
+	return await new Promise((resolve, reject) => {
+		let data = Buffer.alloc(0);
+		const onData = (chunk: Buffer) => {
+			data = Buffer.concat([data, chunk]);
+			const index = data.indexOf('\r\n\r\n');
+			if (index >= 0) {
+				client.pause();
+				cleanup();
+				resolve({head: data.subarray(0, index), rest: data.subarray(index + 4)});
+			} else if (data.length > 65_536) {
+				cleanup(); reject(new Error('HTTP 请求头过大'));
+			}
+		};
+		const onError = (error: Error) => { cleanup(); reject(error); };
+		const cleanup = () => { client.off('data', onData); client.off('error', onError); };
+		client.on('data', onData);
+		client.once('error', onError);
+	});
+}
+
+async function handleProxyClient(client: Socket, proxyUrl: string, healthToken: string): Promise<void> {
+	let upstream: Socket | undefined;
+	try {
+		const {head, rest} = await readHttpHead(client);
+		const lines = head.toString('latin1').split('\r\n');
+		const [method = '', target = '', protocol = ''] = (lines.shift() || '').split(' ');
+		if (!method || !target || !protocol) throw new Error('HTTP 请求行无效');
+		if (method === 'GET' && target === `http://cpm.internal/__health/${healthToken}`) {
+			client.end(`HTTP/1.1 200 OK\r\nContent-Length: ${healthToken.length}\r\nConnection: close\r\n\r\n${healthToken}`);
+			return;
+		}
+		if (method.toUpperCase() === 'CONNECT') {
+			const [host, port] = splitHostPort(target, 443);
+			upstream = await socksConnect(proxyUrl, host, port);
+			client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+			if (rest.length) upstream.write(rest);
+		} else {
+			const url = new URL(target);
+			if (url.protocol !== 'http:') throw new Error('仅支持 HTTP 绝对地址或 CONNECT');
+			upstream = await socksConnect(proxyUrl, url.hostname, Number(url.port || 80));
+			const filtered = lines.filter(line => !/^(proxy-connection|proxy-authorization|connection|keep-alive):/i.test(line));
+			if (!filtered.some(line => /^host:/i.test(line))) filtered.push('Host: ' + url.host);
+			const path = `${url.pathname || '/'}${url.search}`;
+			upstream.write(`${method} ${path} ${protocol}\r\n${filtered.join('\r\n')}\r\nConnection: close\r\n\r\n`);
+			if (rest.length) upstream.write(rest);
+		}
+		client.pipe(upstream).pipe(client);
+	} catch {
+		if (!client.destroyed) client.end('HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n');
+		upstream?.destroy();
+	}
+}
+
+export async function runBridge(configFile: string, port: number, healthToken: string): Promise<never> {
+	process.env.CPM_PROXY_CONFIG = configFile;
+	const config = await readRuntimeConfig();
+	parseProxy(config.proxyUrl);
+	await mkdir(stateDir(), {recursive: true, mode: 0o700});
+	const server = net.createServer(client => void handleProxyClient(client, config.proxyUrl, healthToken));
+	await new Promise<void>((resolve, reject) => {
+		server.once('error', reject);
+		server.listen(port, '127.0.0.1', resolve);
+	});
+	await writeFile(pidPath(port), `${JSON.stringify({pid: process.pid, token: healthToken})}\n`, {mode: 0o600});
+	const stop = () => server.close();
+	process.on('SIGTERM', stop);
+	process.on('SIGINT', stop);
+	await new Promise<void>(resolve => server.once('close', resolve));
+	await rm(pidPath(port), {force: true});
+	process.exit(0);
+}
+
+async function executable(path: string): Promise<boolean> {
+	try { await access(path, fsConstants.X_OK); return true; } catch { return false; }
+}
+
+function processAlive(pid: number): boolean {
+	try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+async function portOpen(port: number): Promise<boolean> {
+	try { (await connectTcp('127.0.0.1', port, 1_000)).destroy(); return true; } catch { return false; }
+}
+
+async function bridgeHealthy(port: number, token: string): Promise<boolean> {
+	try {
+		const socket = await connectTcp('127.0.0.1', port, 1_000);
+		return await new Promise<boolean>(resolve => {
+			let response = '';
+			const timer = setTimeout(() => { socket.destroy(); resolve(false); }, 1_000);
+			socket.on('data', chunk => { response += chunk.toString('utf8'); });
+			socket.once('end', () => { clearTimeout(timer); resolve(response.endsWith(token)); });
+			socket.once('error', () => { clearTimeout(timer); resolve(false); });
+			socket.end(`GET http://cpm.internal/__health/${token} HTTP/1.1\r\nHost: cpm.internal\r\nConnection: close\r\n\r\n`);
+		});
+	} catch { return false; }
+}
+
+function relaunchArgs(command: string, args: string[]): {executable: string; args: string[]} {
+	const executable = process.execPath;
+	if (['node', 'nodejs', 'bun'].includes(basename(executable))) {
+		return {executable, args: [process.argv[1]!, command, ...args]};
+	}
+	return {executable, args: [command, ...args]};
+}
+
+export async function stopBridge(port = DEFAULT_PORT): Promise<void> {
+	try {
+		const stored = (await readFile(pidPath(port), 'utf8')).trim();
+		const pid = stored.startsWith('{') ? Number((JSON.parse(stored) as {pid?: number}).pid) : Number(stored);
+		if (Number.isInteger(pid) && processAlive(pid)) process.kill(pid, 'SIGTERM');
+	} catch {}
+	await rm(pidPath(port), {force: true});
+}
+
+export async function ensureBridge(config: RuntimeConfig): Promise<void> {
+	if (!Number.isInteger(config.httpPort) || config.httpPort < 1 || config.httpPort > 65_535) throw new Error('HTTP_PORT 必须在 1-65535 之间');
+	let owned = false;
+	try {
+		const stored = JSON.parse(await readFile(pidPath(config.httpPort), 'utf8')) as {pid?: number; token?: string};
+		owned = Number.isInteger(stored.pid) && processAlive(stored.pid!) && Boolean(stored.token) && await bridgeHealthy(config.httpPort, stored.token!);
+	} catch {}
+	if (owned) return;
+	if (await portOpen(config.httpPort)) throw new Error(`端口 ${config.httpPort} 被非 cpm 进程占用`);
+	await mkdir(stateDir(), {recursive: true, mode: 0o700});
+	const token = randomBytes(18).toString('hex');
+	const relaunch = relaunchArgs('__proxy-bridge', ['--config', configPath(), '--port', String(config.httpPort), '--health-token', token]);
+	const child = spawn(relaunch.executable, relaunch.args, {
+		detached: true,
+		stdio: ['ignore', 'ignore', (await import('node:fs')).openSync(logPath(config.httpPort), 'a')],
+	});
+	child.unref();
+	for (let index = 0; index < 40; index++) {
+		if (await bridgeHealthy(config.httpPort, token)) return;
+		await new Promise(resolve => setTimeout(resolve, 100));
+	}
+	throw new Error(`本地代理 bridge 启动失败，日志：${logPath(config.httpPort)}`);
+}
+
+export function proxyEnvironment(config: RuntimeConfig): NodeJS.ProcessEnv {
+	const proxy = `http://127.0.0.1:${config.httpPort}`;
+	const environment: NodeJS.ProcessEnv = {
+		...process.env,
+		ALL_PROXY: proxy, all_proxy: proxy,
+		HTTPS_PROXY: proxy, https_proxy: proxy,
+		HTTP_PROXY: proxy, http_proxy: proxy,
+		NO_PROXY: config.noProxy, no_proxy: config.noProxy,
+		TZ: config.timezone,
+		LANG: config.locale, LC_ALL: config.locale, LC_CTYPE: config.locale, LC_MESSAGES: config.locale,
+	};
+	if (config.claudeConfigDir) environment.CLAUDE_CONFIG_DIR = config.claudeConfigDir;
+	return environment;
+}
+
+function row(name: string, state: CheckState, value: string, detail = ''): CheckItem {
+	return {name, state, value, detail};
+}
+
+async function currentBinaryMatches(): Promise<boolean> {
+	try {
+		const current = await realpath(process.execPath);
+		const installed = await realpath(join(homedir(), '.local', 'bin', 'cpm'));
+		return current === installed;
+	} catch { return false; }
+}
+
+export async function inspectProxyRuntime(): Promise<CheckItem[]> {
+	const rows: CheckItem[] = [];
+	const config = await readRuntimeConfig();
+	rows.push(row('cpm 运行时', await currentBinaryMatches() ? 'PASS' : 'INFO', VERSION, process.execPath));
+	try {
+		const mode = ((await import('node:fs/promises')).stat(configPath()).then(value => (value.mode & 0o777).toString(8)));
+		const actual = await mode;
+		rows.push(row('配置文件', actual === '600' ? 'PASS' : 'WARN', configPath(), `权限 ${actual}`));
+	} catch { rows.push(row('配置文件', 'FAIL', '缺失', configPath())); }
+	rows.push(row('Claude CLI', await executable(config.claudeBin) ? 'PASS' : 'FAIL', config.claudeBin || '未配置'));
+	let parsed: URL | undefined;
+	try {
+		parsed = parseProxy(config.proxyUrl);
+		rows.push(row('SOCKS5 配置', parsed.protocol === 'socks5h:' ? 'PASS' : 'WARN', `${parsed.hostname}:${parsed.port}`, parsed.protocol === 'socks5h:' ? '远端 DNS' : '建议使用 socks5h'));
+	} catch (error) { rows.push(row('SOCKS5 配置', 'FAIL', (error as Error).message)); }
+	if (parsed) {
+		try { const tcp = await connectTcp(parsed.hostname.replace(/^\[|\]$/g, ''), Number(parsed.port)); tcp.destroy(); rows.push(row('代理网关 TCP', 'PASS', `${parsed.hostname}:${parsed.port}`)); }
+		catch (error) { rows.push(row('代理网关 TCP', 'FAIL', `${parsed.hostname}:${parsed.port}`, (error as Error).message)); }
+		try { const socks = await socksConnect(config.proxyUrl, 'api.ipify.org', 443); socks.destroy(); rows.push(row('SOCKS5 认证', 'PASS', '通过')); }
+		catch (error) { rows.push(row('SOCKS5 认证', 'FAIL', '失败', (error as Error).message)); }
+	}
+	try { await ensureBridge(config); rows.push(row('内置 HTTP bridge', 'PASS', `127.0.0.1:${config.httpPort}`)); }
+	catch (error) { rows.push(row('内置 HTTP bridge', 'FAIL', '不可用', (error as Error).message)); }
+	const env = proxyEnvironment(config);
+	const proxy = `http://127.0.0.1:${config.httpPort}`;
+	for (const name of ['ALL_PROXY', 'all_proxy', 'HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy'] as const) rows.push(row(name, env[name] === proxy ? 'PASS' : 'FAIL', env[name] || '<空>'));
+	for (const name of ['NO_PROXY', 'no_proxy'] as const) rows.push(row(name, env[name] === config.noProxy ? 'PASS' : 'FAIL', env[name] || '<空>'));
+	rows.push(row('TZ', env.TZ === config.timezone ? 'PASS' : 'FAIL', env.TZ || '<空>'));
+	try {
+		const now = new Date();
+		const short = new Intl.DateTimeFormat('en-US', {timeZone: config.timezone, timeZoneName: 'short'}).formatToParts(now).find(part => part.type === 'timeZoneName')?.value;
+		const offset = new Intl.DateTimeFormat('en-US', {timeZone: config.timezone, timeZoneName: 'shortOffset'}).formatToParts(now).find(part => part.type === 'timeZoneName')?.value;
+		rows.push(row('时区实际值', 'PASS', [short, offset].filter(Boolean).join(' ')));
+	} catch (error) { rows.push(row('时区实际值', 'FAIL', '无效时区', (error as Error).message)); }
+	for (const name of ['LANG', 'LC_ALL', 'LC_CTYPE', 'LC_MESSAGES'] as const) rows.push(row(name, env[name] === config.locale ? 'PASS' : 'FAIL', env[name] || '<空>'));
+	rows.push(row('CLAUDE_CONFIG_DIR', config.claudeConfigDir && env.CLAUDE_CONFIG_DIR === config.claudeConfigDir ? 'PASS' : 'INFO', config.claudeConfigDir || '<Claude 默认目录>'));
+	rows.push(row('DNS 模式', parsed?.protocol === 'socks5h:' ? 'PASS' : 'WARN', parsed?.protocol === 'socks5h:' ? 'SOCKS5H 远端解析' : '非远端解析'));
+	rows.push(row('浏览器集成', 'PASS', '--no-chrome'));
+	try {
+		const direct = await httpsRequest('api.ipify.org', '/');
+		rows.push(row('开发机直连 IP', direct.status === 200 ? 'PASS' : 'WARN', direct.body || `HTTP ${direct.status}`));
+	} catch (error) { rows.push(row('开发机直连 IP', 'WARN', '获取失败', (error as Error).message)); }
+	if (parsed) {
+		try {
+			const result = await bridgedHttps(config.httpPort, 'api.ipify.org', '/');
+			const ip = result.body;
+			rows.push(row('代理出口 IP', result.status === 200 && Boolean(ip) ? 'PASS' : 'FAIL', ip || `HTTP ${result.status}`));
+			const endpoint = parsed.hostname;
+			const isAddress = net.isIP(endpoint) > 0;
+			rows.push(row('出口与节点 IP', !isAddress ? 'INFO' : ip === endpoint ? 'PASS' : 'WARN', !isAddress ? '节点使用域名' : ip === endpoint ? '一致' : '不一致', isAddress && ip !== endpoint ? `${endpoint} → ${ip}` : ''));
+		} catch (error) { rows.push(row('代理出口 IP', 'FAIL', '获取失败', (error as Error).message)); }
+		try {
+			const result = await bridgedHttps(config.httpPort, 'api.anthropic.com', '/v1/messages');
+			rows.push(row('Anthropic API', HTTP_OK.has(result.status) ? 'PASS' : 'FAIL', `HTTP ${result.status}`));
+		} catch (error) { rows.push(row('Anthropic API', 'FAIL', '不可达', (error as Error).message)); }
+	}
+	return rows;
+}
+
+export function formatCheckTable(rows: CheckItem[]): string {
+	return statusSummary({connected: true, checks: rows});
+}
+
+export async function runClaudeProxy(args: string[]): Promise<number> {
+	const config = await readRuntimeConfig();
+	parseProxy(config.proxyUrl);
+	if (!await executable(config.claudeBin)) throw new Error(`Claude CLI 不存在：${config.claudeBin || '<未配置>'}`);
+	if (args[0] === '--check' || args[0] === 'check') {
+		const rows = await inspectProxyRuntime();
+		console.log(formatCheckTable(rows));
+		return rows.some(item => item.state === 'FAIL') ? 3 : 0;
+	}
+	if (args[0] === '--stop-bridge') { await stopBridge(config.httpPort); return 0; }
+	await ensureBridge(config);
+	return await new Promise((resolve, reject) => {
+		const child = spawn(config.claudeBin, ['--no-chrome', ...args], {stdio: 'inherit', env: proxyEnvironment(config)});
+		child.once('error', reject);
+		child.once('exit', (code, signal) => {
+			if (signal) process.kill(process.pid, signal);
+			resolve(code ?? 1);
+		});
+	});
+}

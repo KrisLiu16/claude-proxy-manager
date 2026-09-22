@@ -133,7 +133,7 @@ fi
 mv "$TMP" "$BIN_DIR/cpm"
 tick "安装" "$(short "$BIN_DIR/cpm")"
 
-ENV_FILE="$HOME/.config/claude-proxy-manager/env"
+ENV_FILE="$HOME/.config/cpm/env"
 if [ "$BIN_DIR" = "$DEFAULT_BIN_DIR" ]; then PATH_DIR='$HOME/.local/bin'; else PATH_DIR="$BIN_DIR"; fi
 if [ "${CPM_NO_MODIFY_PATH:-0}" = 1 ]; then
   row "路径" "没改 shell 配置（CPM_NO_MODIFY_PATH=1）"
@@ -150,7 +150,7 @@ else
       WROTE="$WROTE $(short "$1")"
     fi
   }
-  SOURCE_LINE='. "$HOME/.config/claude-proxy-manager/env"'
+  SOURCE_LINE='. "$HOME/.config/cpm/env"'
   add_line "$HOME/.profile" "$SOURCE_LINE"
   if command -v bash >/dev/null 2>&1; then
     add_line "$HOME/.bashrc" "$SOURCE_LINE"

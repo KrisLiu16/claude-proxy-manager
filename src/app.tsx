@@ -4,7 +4,7 @@ import TextInput from 'ink-text-input';
 import type {ProfileStore} from './config.js';
 import type {SecretStore} from './secrets.js';
 import type {HostProfile} from './types.js';
-import {normalizeNoProxy, parseProxySpec, statusSummary, validateHost} from './types.js';
+import {DEFAULT_LOCALE, DEFAULT_TIMEZONE, normalizeNoProxy, parseProxySpec, statusSummary, validateHost} from './types.js';
 import type {SSHClient} from './ssh.js';
 
 type Props = {
@@ -23,10 +23,13 @@ type FormState = {
 	proxyUser: string;
 	password: string;
 	noProxy: string;
+	timezone: string;
+	locale: string;
+	claudeConfigDir: string;
 	replaceClaude: boolean;
 };
 
-const fieldNames = ['name', 'sshHost', 'proxySpec', 'proxyHost', 'proxyPort', 'proxyUser', 'password', 'noProxy'] as const;
+const fieldNames = ['name', 'sshHost', 'proxySpec', 'proxyHost', 'proxyPort', 'proxyUser', 'password', 'noProxy', 'timezone', 'locale', 'claudeConfigDir'] as const;
 type FieldName = (typeof fieldNames)[number];
 
 const labels: Record<FieldName, string> = {
@@ -38,6 +41,9 @@ const labels: Record<FieldName, string> = {
 	proxyUser: '代理用户',
 	password: '代理密码',
 	noProxy: 'NO_PROXY（逗号分隔）',
+	timezone: 'Claude 进程时区',
+	locale: 'Claude 进程 locale',
+	claudeConfigDir: 'CLAUDE_CONFIG_DIR（可选）',
 };
 
 function emptyForm(): FormState {
@@ -50,6 +56,9 @@ function emptyForm(): FormState {
 		proxyUser: '',
 		password: '',
 		noProxy: '',
+		timezone: DEFAULT_TIMEZONE,
+		locale: DEFAULT_LOCALE,
+		claudeConfigDir: '',
 		replaceClaude: false,
 	};
 }
@@ -94,6 +103,9 @@ export function App({initialHosts, store, secrets, ssh}: Props): React.JSX.Eleme
 			proxyUser: host.proxyUser,
 			password: passwordFor(host.name) ?? '',
 			noProxy: host.noProxy.join(','),
+			timezone: host.timezone,
+			locale: host.locale,
+			claudeConfigDir: host.claudeConfigDir,
 			replaceClaude: host.replaceClaude,
 		} : emptyForm());
 		setFocus(0);
@@ -129,6 +141,9 @@ export function App({initialHosts, store, secrets, ssh}: Props): React.JSX.Eleme
 			proxyUser,
 			noProxy: normalizeNoProxy(form.noProxy),
 			replaceClaude: form.replaceClaude,
+			timezone: form.timezone.trim(),
+			locale: form.locale.trim(),
+			claudeConfigDir: form.claudeConfigDir.trim(),
 		};
 		try {
 			validateHost(host, true);
@@ -217,9 +232,9 @@ export function App({initialHosts, store, secrets, ssh}: Props): React.JSX.Eleme
 				return `检查完成\n${statusSummary(result)}`;
 			});
 		} else if (input === 'i' && selected) {
-			void runOperation(`正在检查并安装 Claude/启动器到 ${selected.name}`, async () => {
+			void runOperation(`正在检查并安装 Claude/cpm 到 ${selected.name}`, async () => {
 				await ssh.install(selected);
-				return 'Claude 与代理启动器已就绪';
+				return 'Claude 与 cpm 运行时已就绪';
 			});
 		} else if (input === 's' && selected) {
 			const password = passwordFor(selected.name);
@@ -278,15 +293,15 @@ export function App({initialHosts, store, secrets, ssh}: Props): React.JSX.Eleme
 					/>
 				</Box>)}
 			</Box>
-			<Box marginTop={1}><Text>Ctrl+T 默认将 claude 路由到 claude-proxy: <Text color={form.replaceClaude ? 'green' : 'yellow'}>{form.replaceClaude ? '开启' : '关闭'}</Text></Text></Box>
+			<Box marginTop={1}><Text>Ctrl+T 默认将 claude 路由到 cpm proxy: <Text color={form.replaceClaude ? 'green' : 'yellow'}>{form.replaceClaude ? '开启' : '关闭'}</Text></Text></Box>
 			<Box marginTop={1}><Text color={statusColor}>{status}</Text></Box>
 			<Box marginTop={1}><Text dimColor>Tab/Shift+Tab 切换字段  Ctrl+T 开关替换  Ctrl+S 保存  Esc 取消</Text></Box>
 		</Box>;
 	}
 
 	return <Box flexDirection="column">
-		<Text bold color="cyan">Claude Proxy Manager</Text>
-		<Text dimColor>每台开发机独立配置；SSH 使用本机密钥、agent 和 ~/.ssh/config</Text>
+		<Text bold color="cyan">CPM</Text>
+		<Text dimColor>每台开发机独立配置；cpm 通过 SSH 分发自身并运行内置代理</Text>
 		<Box flexDirection="column" marginTop={1}>
 			{orderedHosts.length === 0 && <Text>  暂无机器，按 a 添加</Text>}
 			{orderedHosts.map((host, index) => <Text key={host.name} inverse={index === cursor}>
@@ -296,6 +311,6 @@ export function App({initialHosts, store, secrets, ssh}: Props): React.JSX.Eleme
 		<Box borderStyle="round" borderColor={statusColor} paddingX={1} marginTop={1}>
 			<Text color={statusColor}>{busy ? '… ' : ''}{status}</Text>
 		</Box>
-		<Box marginTop={1}><Text dimColor>↑/↓ 选择  a 添加  e 编辑  c 检查  i 安装 Claude/代理  s 一键设置  t 切换默认替换  d 删除  q 退出</Text></Box>
+		<Box marginTop={1}><Text dimColor>↑/↓ 选择  a 添加  e 编辑  c 逐项检查  i 安装 Claude/cpm  s 一键设置  t 切换默认替换  d 删除  q 退出</Text></Box>
 	</Box>;
 }

@@ -3,7 +3,7 @@ import {homedir} from 'node:os';
 import {dirname, join} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import type {HostProfile} from './types.js';
-import {normalizeNoProxy, validateHost} from './types.js';
+import {DEFAULT_LOCALE, DEFAULT_TIMEZONE, normalizeNoProxy, validateHost} from './types.js';
 
 type ConfigDocument = {
 	version: 1;
@@ -12,7 +12,7 @@ type ConfigDocument = {
 
 export function defaultConfigPath(): string {
 	const base = process.env.XDG_CONFIG_HOME || join(homedir(), '.config');
-	return join(base, 'claude-proxy-manager', 'config.json');
+	return join(base, 'cpm', 'hosts.json');
 }
 
 export class ProfileStore {
@@ -38,6 +38,9 @@ export class ProfileStore {
 			proxyUser: String(value.proxyUser ?? ''),
 			noProxy: normalizeNoProxy(value.noProxy ?? []),
 			replaceClaude: Boolean(value.replaceClaude),
+			timezone: String(value.timezone || DEFAULT_TIMEZONE),
+			locale: String(value.locale || DEFAULT_LOCALE),
+			claudeConfigDir: String(value.claudeConfigDir || ''),
 		}));
 		for (const host of hosts) validateHost(host);
 		return hosts.sort((left, right) => left.name.localeCompare(right.name));
@@ -55,4 +58,3 @@ export class ProfileStore {
 		await chmod(this.path, 0o600);
 	}
 }
-

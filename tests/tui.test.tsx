@@ -17,6 +17,9 @@ test('TUI host list renders without a terminal', () => {
 			proxyUser: 'alice',
 			noProxy: ['.internal'],
 			replaceClaude: true,
+			timezone: 'America/Los_Angeles',
+			locale: 'en_US.UTF-8',
+			claudeConfigDir: '',
 		}]}
 		store={new ProfileStore('/tmp/not-used-cpm-test.json')}
 		secrets={new SecretStore()}
@@ -26,4 +29,3 @@ test('TUI host list renders without a terminal', () => {
 	assert.match(output, /dev/);
 	assert.match(output, /claude→proxy=on/);
 });
-

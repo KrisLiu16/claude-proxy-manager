@@ -1,20 +1,18 @@
 {
   "name": "claude-proxy-manager",
-  "version": "0.1.4",
-  "description": "Manage claude-proxy launchers on remote development machines over SSH",
+  "version": "0.2.0",
+  "description": "Manage remote development machines and run Claude through an integrated proxy",
   "type": "module",
   "bin": {
     "cpm": "dist/cli.js"
   },
   "files": [
     "dist",
-    "assets",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
-    "embed-assets": "node scripts/embed-assets.mjs",
-    "build": "npm run embed-assets && tsc -p tsconfig.json",
+    "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.json",
     "build:release": "sh scripts/build-release.sh release",
     "dev": "tsx src/cli.tsx",
     "test": "node --import tsx --test tests/*.test.ts tests/*.test.tsx",
