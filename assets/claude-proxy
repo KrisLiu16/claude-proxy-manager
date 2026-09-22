@@ -1,0 +1,107 @@
+#!/bin/sh
+set -eu
+
+CONFIG_FILE="${CLAUDE_PROXY_CONFIG:-$HOME/.config/claude-proxy/config}"
+INSTALL_DIR="$HOME/.local/share/claude-proxy"
+BRIDGE_SCRIPT="$INSTALL_DIR/socks_http_bridge.py"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/claude-proxy"
+HTTP_PORT="${CLAUDE_PROXY_HTTP_PORT:-17890}"
+PID_FILE="$STATE_DIR/bridge-$HTTP_PORT.pid"
+LOG_FILE="$STATE_DIR/bridge-$HTTP_PORT.log"
+
+config_value() {
+    [ -f "$CONFIG_FILE" ] || return 0
+    awk -v wanted="$1" 'index($0, wanted "=") == 1 {print substr($0, length(wanted) + 2); exit}' "$CONFIG_FILE"
+}
+
+port_open() {
+    python3 - "$1" "$2" <<'PY'
+import socket, sys
+try:
+    socket.create_connection((sys.argv[1], int(sys.argv[2])), 1).close()
+except OSError:
+    raise SystemExit(1)
+PY
+}
+
+bridge_owned() {
+    [ -s "$PID_FILE" ] || return 1
+    pid=$(cat "$PID_FILE" 2>/dev/null || true)
+    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null || return 1
+    [ -r "/proc/$pid/cmdline" ] || return 1
+    command_line=$(tr '\000' ' ' < "/proc/$pid/cmdline")
+    case "$command_line" in
+        *"$BRIDGE_SCRIPT"*"--config $CONFIG_FILE"*) ;;
+        *) return 1 ;;
+    esac
+    port_open 127.0.0.1 "$HTTP_PORT"
+}
+
+ensure_bridge() {
+    if bridge_owned; then
+        return 0
+    fi
+    if port_open 127.0.0.1 "$HTTP_PORT"; then
+        echo "claude-proxy: port $HTTP_PORT is occupied by an unmanaged process" >&2
+        return 5
+    fi
+    mkdir -p "$STATE_DIR"
+    chmod 700 "$STATE_DIR"
+    nohup python3 "$BRIDGE_SCRIPT" --config "$CONFIG_FILE" --port "$HTTP_PORT" \
+        --pid-file "$PID_FILE" </dev/null >>"$LOG_FILE" 2>&1 &
+    count=0
+    while [ "$count" -lt 40 ]; do
+        bridge_owned && return 0
+        count=$((count + 1))
+        sleep 0.1
+    done
+    echo "claude-proxy: local bridge failed to start; see $LOG_FILE" >&2
+    return 5
+}
+
+if [ "${1-}" = "--stop-bridge" ]; then
+    if [ -s "$PID_FILE" ]; then
+        pid=$(cat "$PID_FILE" 2>/dev/null || true)
+        [ -z "$pid" ] || kill "$pid" 2>/dev/null || true
+    fi
+    exit 0
+fi
+
+proxy="${CLAUDE_SOCKS5_PROXY:-$(config_value SOCKS5_PROXY)}"
+case "$proxy" in
+    socks5://*|socks5h://*) ;;
+    *) echo "claude-proxy: configure a socks5h:// proxy first" >&2; exit 2 ;;
+esac
+
+if [ ! -f "$BRIDGE_SCRIPT" ]; then
+    echo "claude-proxy: bridge is missing: $BRIDGE_SCRIPT" >&2
+    exit 5
+fi
+
+CLAUDE_BIN="${CLAUDE_BIN:-$(config_value CLAUDE_BIN)}"
+if [ -z "$CLAUDE_BIN" ] || [ ! -x "$CLAUDE_BIN" ]; then
+    echo "claude-proxy: real Claude executable is missing: ${CLAUDE_BIN:-<not configured>}" >&2
+    exit 4
+fi
+
+proxy_no_proxy="${CLAUDE_PROXY_NO_PROXY:-$(config_value NO_PROXY)}"
+export NO_PROXY="$proxy_no_proxy" no_proxy="$proxy_no_proxy"
+export ALL_PROXY="http://127.0.0.1:$HTTP_PORT" all_proxy="http://127.0.0.1:$HTTP_PORT"
+export HTTPS_PROXY="$ALL_PROXY" https_proxy="$ALL_PROXY"
+export HTTP_PROXY="$ALL_PROXY" http_proxy="$ALL_PROXY"
+export TZ="${CLAUDE_PROXY_TZ:-America/Los_Angeles}"
+
+ensure_bridge
+
+if [ "${1-}" = "--check" ] || [ "${1-}" = "check" ]; then
+    printf '%s\n' "claude-proxy preflight"
+    printf 'claude_bin=%s\n' "$CLAUDE_BIN"
+    printf 'bridge=OK\n'
+    printf 'no_proxy=%s\n' "${proxy_no_proxy:-<empty>}"
+    public_ip=$(curl -fsS --max-time 25 --proxy "$HTTP_PROXY" https://api.ipify.org 2>/dev/null || true)
+    [ -n "$public_ip" ] || { echo "proxied_public_ip=FAILED"; exit 3; }
+    printf 'proxied_public_ip=%s\n' "$public_ip"
+    exit 0
+fi
+
+exec "$CLAUDE_BIN" --no-chrome "$@"
