@@ -1,5 +1,7 @@
 /bin/
 /dist/
+/dist-bin/
+/release/
 /node_modules/
 *.test
 coverage.out

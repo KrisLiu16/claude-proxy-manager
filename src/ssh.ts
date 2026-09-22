@@ -1,8 +1,7 @@
 import {spawn} from 'node:child_process';
-import {readFile} from 'node:fs/promises';
-import {fileURLToPath} from 'node:url';
 import type {HostProfile, RemoteStatus} from './types.js';
 import {validateHost} from './types.js';
+import {bridgeBase64, launcherBase64} from './embedded-assets.js';
 
 const checkScript = String.raw`set -eu
 config="$HOME/.config/claude-proxy/config"
@@ -123,10 +122,6 @@ function shellQuote(value: string): string {
 	return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
-function assetPath(name: string): string {
-	return fileURLToPath(new URL(`../assets/${name}`, import.meta.url));
-}
-
 export class SSHClient {
 	public constructor(private readonly connectTimeoutSeconds = 10) {}
 
@@ -188,15 +183,11 @@ export class SSHClient {
 	}
 
 	public async install(host: HostProfile): Promise<void> {
-		const [launcher, bridge] = await Promise.all([
-			readFile(assetPath('claude-proxy')),
-			readFile(assetPath('socks_http_bridge.py')),
-		]);
 		const script = String.raw`set -eu
 umask 077
 mkdir -p "$HOME/.local/bin" "$HOME/.local/share/claude-proxy"
-printf '%s' ${shellQuote(launcher.toString('base64'))} | base64 -d > "$HOME/.local/bin/claude-proxy"
-printf '%s' ${shellQuote(bridge.toString('base64'))} | base64 -d > "$HOME/.local/share/claude-proxy/socks_http_bridge.py"
+printf '%s' ${shellQuote(launcherBase64)} | base64 -d > "$HOME/.local/bin/claude-proxy"
+printf '%s' ${shellQuote(bridgeBase64)} | base64 -d > "$HOME/.local/share/claude-proxy/socks_http_bridge.py"
 chmod 755 "$HOME/.local/bin/claude-proxy" "$HOME/.local/share/claude-proxy/socks_http_bridge.py"
 `;
 		await this.runScript(host.sshHost, script, 60_000);
@@ -225,4 +216,3 @@ chmod 755 "$HOME/.local/bin/claude-proxy" "$HOME/.local/share/claude-proxy/socks
 }
 
 export const scriptsForTest = {applyScript, toggleScript};
-

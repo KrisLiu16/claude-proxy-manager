@@ -10,17 +10,17 @@
 - 检查代理实际连通性
 - 可选地让 `claude` 默认执行 `claude-proxy`
 - 同时提供 TUI 和非交互命令
-- 本地密码使用系统钥匙串；普通 JSON 配置不含密码
+- 本地密码使用独立的 `0600` 机密文件；普通主机配置不含密码
 
 ## 安全设计
 
-- 代理密码不进入 Git、本地 JSON、SSH 参数或远端进程参数
+- 代理密码不进入 Git、普通主机配置、SSH 参数或远端进程参数
 - 密码通过 SSH 标准输入写入远端 `~/.config/claude-proxy/config`，权限固定为 `600`
 - bridge 只监听 `127.0.0.1`，运行时从私有配置文件读取凭据
 - 启动器在配置缺失、bridge 启动失败或真实 Claude 不存在时停止，不回落到直连
 - “替换 Claude”不会覆盖真实二进制。它在独立目录创建 shim，并通过受标记的 shell 配置块调整 `PATH`，关闭开关即可撤销
 
-在 macOS 和 Windows 上，密码存入系统原生钥匙串。在 Linux 上优先使用 Secret Service，缺失时尝试内核 keyring。若当前 Linux 登录会话没有可用钥匙串，密码只保留到本次 TUI 退出，仍可立即执行一键设置。
+本地密码位于 `~/.config/claude-proxy-manager/secrets.json`，目录权限为 `0700`，文件权限为 `0600`。这样发布的单文件可执行程序不依赖平台原生扩展。
 
 ## 环境要求
 
@@ -40,19 +40,26 @@ SSH 操作使用 `BatchMode=yes`，不会在 TUI 中询问 SSH 密码。
 
 ## 安装
 
+一键安装或升级最新版本：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main/install.sh | sh
+```
+
+安装指定版本：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main/install.sh | CPM_VERSION=v0.1.0 sh
+```
+
+安装器支持 Linux/macOS 的 x64 和 arm64，下载 GitHub Release 中的单文件可执行程序，并在安装前验证 SHA-256。默认安装到 `~/.local/bin/cpm`，可通过 `CPM_INSTALL_DIR` 修改。
+
 开发环境：
 
 ```bash
 npm install
 npm run build
 npm link
-cpm
-```
-
-直接从 GitHub 安装：
-
-```bash
-npm install -g github:KrisLiu16/claude-proxy-manager
 cpm
 ```
 

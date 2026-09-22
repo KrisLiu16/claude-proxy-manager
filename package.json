@@ -13,7 +13,9 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "embed-assets": "node scripts/embed-assets.mjs",
+    "build": "npm run embed-assets && tsc -p tsconfig.json",
+    "build:release": "sh scripts/build-release.sh release",
     "dev": "tsx src/cli.tsx",
     "test": "node --import tsx --test tests/*.test.ts tests/*.test.tsx",
     "check": "npm run build && npm test",
@@ -26,11 +28,11 @@
   },
   "license": "Apache-2.0",
   "dependencies": {
-    "@napi-rs/keyring": "^2.1.0",
     "commander": "^15.0.0",
     "ink": "^7.1.1",
     "ink-text-input": "^6.0.0",
-    "react": "^19.3.0"
+    "react": "^19.3.0",
+    "react-devtools-core": "^8.0.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

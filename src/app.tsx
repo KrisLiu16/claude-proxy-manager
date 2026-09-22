@@ -146,7 +146,7 @@ export function App({initialHosts, store, secrets, ssh}: Props): React.JSX.Eleme
 				try {
 					secrets.set(host.name, password);
 				} catch {
-					warning = '；系统钥匙串不可用，密码仅保留到本次退出';
+					warning = '；本地机密文件写入失败，密码仅保留到本次退出';
 				}
 			}
 			if (originalName && originalName !== host.name) {
@@ -265,7 +265,7 @@ export function App({initialHosts, store, secrets, ssh}: Props): React.JSX.Eleme
 	if (mode === 'edit') {
 		return <Box flexDirection="column">
 			<Text bold color="cyan">编辑机器配置</Text>
-			<Text dimColor>密码保存到系统钥匙串，不写入本地 JSON</Text>
+			<Text dimColor>密码保存在独立的 0600 机密文件中，不写入主机配置</Text>
 			<Box flexDirection="column" marginTop={1}>
 				{fieldNames.map((name, index) => <Box key={name}>
 					<Text color={focus === index ? 'cyan' : 'white'}>{focus === index ? '> ' : '  '}{labels[name]}: </Text>
