@@ -12,7 +12,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.json",
+    "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.json && node -e \"require('fs').chmodSync('dist/cli.js',0o755)\"",
     "build:release": "sh scripts/build-release.sh release",
     "dev": "tsx src/cli.tsx",
     "test": "node --import tsx --test tests/*.test.ts tests/*.test.tsx",
