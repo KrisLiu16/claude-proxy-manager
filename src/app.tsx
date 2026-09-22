@@ -6,7 +6,7 @@ import type {SecretStore} from './secrets.js';
 import type {HostProfile} from './types.js';
 import {DEFAULT_LOCALE, DEFAULT_TIMEZONE, normalizeNoProxy, parseProxySpec, statusSummary, validateHost} from './types.js';
 import type {SSHClient} from './ssh.js';
-import type {BrowserSession, OperationProgress, ProgressReporter, RemoteLoginSession} from './ssh.js';
+import type {BrowserSession, OperationProgress, ProgressReporter} from './ssh.js';
 
 type Props = {
 	initialHosts: HostProfile[];
@@ -75,7 +75,7 @@ export function App({initialHosts, store, secrets, ssh, platform = process.platf
 	const {exit} = useApp();
 	const [hosts, setHosts] = useState(initialHosts);
 	const [cursor, setCursor] = useState(0);
-	const [mode, setMode] = useState<'list' | 'edit' | 'login' | 'browser'>('list');
+	const [mode, setMode] = useState<'list' | 'edit' | 'browser'>('list');
 	const [form, setForm] = useState<FormState>(emptyForm);
 	const [focus, setFocus] = useState(0);
 	const [originalName, setOriginalName] = useState('');
@@ -85,8 +85,6 @@ export function App({initialHosts, store, secrets, ssh, platform = process.platf
 	const [status, setStatus] = useState('选择机器后按 s 一键安装和应用配置');
 	const [statusColor, setStatusColor] = useState<'white' | 'green' | 'red'>('white');
 	const [pendingDelete, setPendingDelete] = useState('');
-	const [authorizationCode, setAuthorizationCode] = useState('');
-	const [loginSession, setLoginSession] = useState<RemoteLoginSession>();
 	const [browserSession, setBrowserSession] = useState<BrowserSession>();
 	const sessionPasswords = useRef(new Map<string, string>());
 
@@ -220,51 +218,6 @@ export function App({initialHosts, store, secrets, ssh, platform = process.platf
 		}
 	}
 
-	async function beginLogin(host: HostProfile, password: string): Promise<void> {
-		await runOperation(`正在准备 ${host.name} 的安全登录`, async reporter => {
-			const session = await ssh.beginLogin(host, password, reporter);
-			setLoginSession(session);
-			setAuthorizationCode('');
-			setMode('login');
-			return '登录页已打开；完成网页登录后，将页面显示的授权码粘贴到下方';
-		});
-	}
-
-	async function submitLogin(): Promise<void> {
-		if (!loginSession) return;
-		setBusy(true);
-		setStatus('正在提交授权码');
-		setProgress({percent: 0, label: '正在提交授权码'});
-		setStatusColor('white');
-		try {
-			await loginSession.submit(authorizationCode, update => {
-				setProgress(update);
-				setStatus(update.label);
-			});
-			setStatus('远端 Claude 登录成功');
-			setStatusColor('green');
-		} catch (error) {
-			setStatus((error as Error).message);
-			setStatusColor('red');
-		} finally {
-			setBusy(false);
-			setProgress(undefined);
-			setAuthorizationCode('');
-			setLoginSession(undefined);
-			setMode('list');
-		}
-	}
-
-	async function cancelLogin(): Promise<void> {
-		const session = loginSession;
-		setLoginSession(undefined);
-		setAuthorizationCode('');
-		setMode('list');
-		setStatus('已取消远端 Claude 登录');
-		setStatusColor('white');
-		await session?.cancel();
-	}
-
 	async function beginBrowser(host: HostProfile, password: string): Promise<void> {
 		await runOperation(`正在准备 ${host.name} 的安全浏览器`, async reporter => {
 			const session = await ssh.openBrowser(host, password, reporter);
@@ -298,14 +251,7 @@ export function App({initialHosts, store, secrets, ssh, platform = process.platf
 			void closeBrowser();
 			return;
 		}
-		if (mode === 'login' && (key.escape || (key.ctrl && input === 'c'))) {
-			void cancelLogin();
-			return;
-		}
 		if (busy) return;
-		if (mode === 'login') {
-			return;
-		}
 		if (mode === 'edit') {
 			if (key.escape) {
 				setMode('list');
@@ -352,14 +298,6 @@ export function App({initialHosts, store, secrets, ssh, platform = process.platf
 				const result = await ssh.setup(selected, password, reporter);
 				return `远端配置完成\n${statusSummary(result)}`;
 			});
-		} else if (input === 'l' && selected && platform === 'darwin') {
-			const password = passwordFor(selected.name);
-			if (!password) {
-				setStatus('没有可用的代理密码；按 e 编辑并输入密码');
-				setStatusColor('red');
-				return;
-			}
-			void beginLogin(selected, password);
 		} else if (input === 'g' && selected && platform === 'darwin') {
 			const password = passwordFor(selected.name);
 			if (!password) {
@@ -413,32 +351,6 @@ export function App({initialHosts, store, secrets, ssh, platform = process.platf
 		</Box>;
 	}
 
-	if (mode === 'login') {
-		return <Box flexDirection="column">
-			<Text bold color="cyan">远端 Claude 安全登录</Text>
-			<Text>已用正式 Google Chrome 和原 Profile 打开官方登录页，原有 Cookie 与站点状态会直接生效。</Text>
-			<Text color="green">✓ Chrome 已命中 CPM 本机探针，并通过所配置的 SOCKS5 建立了 HTTPS 隧道。</Text>
-			<Text dimColor>整个 Chrome 实例强制走开发机代理；Profile 语言与 macOS 时区临时匹配出口，结束后恢复。</Text>
-			<Text dimColor>可在新标签打开 https://ip.net.coffee/claude/ 验证，三个出口 IP 应一致且 WebRTC 不应泄露。</Text>
-			<Box marginTop={1}>
-				<Text color="cyan">授权码: </Text>
-				<TextInput
-					value={authorizationCode}
-					onChange={setAuthorizationCode}
-					onSubmit={() => void submitLogin()}
-					focus={!busy}
-					mask="*"
-				/>
-			</Box>
-			<Box borderStyle="round" borderColor={statusColor} paddingX={1} marginTop={1}>
-				<Text color={statusColor}>{busy && progress
-					? `… ${progressBar(progress.percent)} ${String(progress.percent).padStart(3)}%  ${status}\n  已用 ${elapsedSeconds}s`
-					: status}</Text>
-			</Box>
-			<Box marginTop={1}><Text dimColor>粘贴页面显示的授权码后按 Enter 提交  Esc 取消</Text></Box>
-		</Box>;
-	}
-
 	if (mode === 'edit') {
 		return <Box flexDirection="column">
 			<Text bold color="cyan">编辑机器配置</Text>
@@ -475,6 +387,6 @@ export function App({initialHosts, store, secrets, ssh, platform = process.platf
 				? `… ${progressBar(progress.percent)} ${String(progress.percent).padStart(3)}%  ${status}\n  已用 ${elapsedSeconds}s`
 				: status}</Text>
 		</Box>
-		<Box marginTop={1}><Text dimColor>↑/↓ 选择  a 添加  e 编辑  c 逐项检查  s 一键设置{platform === 'darwin' ? '  l 登录远端 Claude  g 安全浏览器' : ''}  t 切换默认替换  d 删除  q 退出</Text></Box>
+		<Box marginTop={1}><Text dimColor>↑/↓ 选择  a 添加  e 编辑  c 逐项检查  s 一键设置{platform === 'darwin' ? '  g 安全浏览器' : ''}  t 切换默认替换  d 删除  q 退出</Text></Box>
 	</Box>;
 }

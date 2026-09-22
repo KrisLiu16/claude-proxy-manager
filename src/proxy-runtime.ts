@@ -648,6 +648,15 @@ export function formatCheckTable(rows: CheckItem[]): string {
 	return statusSummary({connected: true, checks: rows});
 }
 
+export async function runProxyPreflight(
+	inspect: () => Promise<CheckItem[]> = inspectProxyRuntime,
+	write: (text: string) => void = text => process.stderr.write(text),
+): Promise<boolean> {
+	const rows = await inspect();
+	write(`CPM 启动前检查\n${formatCheckTable(rows)}\n`);
+	return !rows.some(item => item.state === 'FAIL');
+}
+
 export async function runClaudeProxy(args: string[]): Promise<number> {
 	const config = await readRuntimeConfig();
 	parseProxy(config.proxyUrl);
@@ -658,6 +667,10 @@ export async function runClaudeProxy(args: string[]): Promise<number> {
 		return rows.some(item => item.state === 'FAIL') ? 3 : 0;
 	}
 	if (args[0] === '--stop-bridge') { await stopBridge(config.httpPort); return 0; }
+	if (!await runProxyPreflight()) {
+		console.error('cpm: 启动前检查存在 FAIL，已停止启动 Claude');
+		return 3;
+	}
 	await ensureBridge(config);
 	const resolution = await resolveAutomaticEnvironment(config, false);
 	if (resolution.error && (config.timezone === 'auto' || config.locale === 'auto')) {

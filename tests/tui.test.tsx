@@ -31,7 +31,7 @@ test('TUI host list renders without a terminal', () => {
 	assert.doesNotMatch(output, /i 安装 Claude/);
 });
 
-test('TUI shows remote Claude login on macOS', () => {
+test('TUI shows only the secure browser shortcut on macOS', () => {
 	const output = renderToString(<App
 		initialHosts={[]}
 		store={new ProfileStore('/tmp/not-used-cpm-test.json')}
@@ -39,6 +39,6 @@ test('TUI shows remote Claude login on macOS', () => {
 		ssh={new SSHClient()}
 		platform="darwin"
 	/>);
-	assert.match(output, /l 登录远端 Claude/);
+	assert.doesNotMatch(output, /l 登录远端 Claude/);
 	assert.match(output, /g\s+安全浏览器/);
 });

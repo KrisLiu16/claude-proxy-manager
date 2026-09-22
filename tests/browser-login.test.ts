@@ -3,24 +3,7 @@ import {mkdir, mkdtemp, readFile, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import test from 'node:test';
-import {applyChromeProfileLanguage, browserLocale, chromeNetworkArguments, lastUsedChromeProfile, validateClaudeAuthorizationUrl} from '../src/browser-login.js';
-
-test('Claude login URL requires an official HTTPS host and OAuth protections', () => {
-	const valid = validateClaudeAuthorizationUrl('https://claude.com/cai/oauth/authorize?state=abc&code_challenge=xyz');
-	assert.equal(valid.hostname, 'claude.com');
-	assert.throws(
-		() => validateClaudeAuthorizationUrl('https://claude.com.evil.example/oauth?state=abc&code_challenge=xyz'),
-		/拒绝打开/,
-	);
-	assert.throws(
-		() => validateClaudeAuthorizationUrl('http://claude.com/oauth?state=abc&code_challenge=xyz'),
-		/拒绝打开/,
-	);
-	assert.throws(
-		() => validateClaudeAuthorizationUrl('https://claude.com/oauth?state=abc'),
-		/PKCE/,
-	);
-});
+import {applyChromeProfileLanguage, browserLocale, chromeNetworkArguments, lastUsedChromeProfile} from '../src/browser-login.js';
 
 test('POSIX locale is converted to a browser locale', () => {
 	assert.equal(browserLocale('en_US.UTF-8'), 'en-US');

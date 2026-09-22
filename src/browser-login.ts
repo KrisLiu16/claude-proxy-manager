@@ -9,15 +9,12 @@ import {acquireMacTimezone, type MacTimezoneLease} from './mac-timezone.js';
 
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const CHROME_ROOT = join(homedir(), 'Library', 'Application Support', 'Google', 'Chrome');
-const AUTH_HOSTS = new Set(['claude.ai', 'claude.com', 'platform.claude.com', 'console.anthropic.com']);
 
 type SecureBrowserOptions = {
 	proxyUrl: string;
 	timezone: string;
 	locale: string;
 };
-
-type ClaudeLoginBrowserOptions = SecureBrowserOptions & {authorizationUrl: string};
 
 export type SecureLoginBrowser = {
 	profileSource: string;
@@ -28,20 +25,6 @@ export type SecureLoginBrowser = {
 
 type ChromeLanguageLease = {restore: () => Promise<void>};
 type StoredPreference = {present: boolean; value: unknown};
-
-export function validateClaudeAuthorizationUrl(value: string): URL {
-	let url: URL;
-	try { url = new URL(value); }
-	catch { throw new Error('Claude 返回了无效的登录链接'); }
-	const host = url.hostname.toLowerCase();
-	if (url.protocol !== 'https:' || !AUTH_HOSTS.has(host) || url.username || url.password) {
-		throw new Error(`拒绝打开非 Claude 官方 HTTPS 登录链接：${host || '<未知主机>'}`);
-	}
-	if (!url.searchParams.get('state') || !url.searchParams.get('code_challenge')) {
-		throw new Error('Claude 登录链接缺少 OAuth state 或 PKCE challenge');
-	}
-	return url;
-}
 
 export function browserLocale(locale: string): string {
 	const candidate = locale.split('.')[0]!.replaceAll('_', '-');
@@ -148,7 +131,7 @@ async function openConfiguredBrowser(options: SecureBrowserOptions, startUrl: UR
 	try { await access(CHROME_PATH, fsConstants.X_OK); }
 	catch { throw new Error('没有找到 Google Chrome，请先安装到 /Applications'); }
 	if (await isChromeRunning()) {
-		throw new Error('请先用 ⌘Q 完全退出 Google Chrome，再按 l 或 g；否则 Chrome 会忽略本次代理参数');
+		throw new Error('请先用 ⌘Q 完全退出 Google Chrome，再按 g；否则 Chrome 会忽略本次代理参数');
 	}
 
 	let bridge: EphemeralBridge | undefined;
@@ -221,11 +204,6 @@ async function openConfiguredBrowser(options: SecureBrowserOptions, startUrl: UR
 		}
 		throw error;
 	}
-}
-
-export async function openSecureClaudeLogin(options: ClaudeLoginBrowserOptions): Promise<SecureLoginBrowser> {
-	const authorizationUrl = validateClaudeAuthorizationUrl(options.authorizationUrl);
-	return await openConfiguredBrowser(options, authorizationUrl);
 }
 
 export async function openSecureBrowser(options: SecureBrowserOptions): Promise<SecureLoginBrowser> {

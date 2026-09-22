@@ -5,7 +5,7 @@ import net from 'node:net';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import test from 'node:test';
-import {proxyEnvironment, readRuntimeConfig, resolveAutomaticEnvironment, socksConnect, startEphemeralBridge, type RuntimeConfig} from '../src/proxy-runtime.js';
+import {proxyEnvironment, readRuntimeConfig, resolveAutomaticEnvironment, runProxyPreflight, socksConnect, startEphemeralBridge, type RuntimeConfig} from '../src/proxy-runtime.js';
 import {saveCachedGeo, type GeoProfile} from '../src/geolocation.js';
 
 test('integrated SOCKS5 client authenticates and requests remote DNS target', async () => {
@@ -85,8 +85,8 @@ test('ephemeral browser bridge listens on loopback and forwards CONNECT through 
 	await new Promise<void>(resolve => upstream.close(() => resolve()));
 });
 
-test('browser probe proves Chrome reached the CPM bridge before OAuth redirect', async () => {
-	const redirect = 'https://claude.com/cai/oauth/authorize?state=abc&code_challenge=xyz';
+test('browser probe proves Chrome reached the CPM bridge before configured redirect', async () => {
+	const redirect = 'https://ip.net.coffee/claude/';
 	const bridge = await startEphemeralBridge('socks5h://alice:secret@127.0.0.1:9', redirect);
 	const client = net.createConnection({host: '127.0.0.1', port: bridge.port});
 	const response = new Promise<string>((resolve, reject) => {
@@ -95,9 +95,23 @@ test('browser probe proves Chrome reached the CPM bridge before OAuth redirect',
 	});
 	client.end(`GET ${bridge.probeUrl} HTTP/1.1\r\nHost: cpm.internal\r\nConnection: close\r\n\r\n`);
 	assert.match(await response, /^HTTP\/1\.1 302 Found/);
-	assert.match(await response, /Location: https:\/\/claude\.com\/cai\/oauth\/authorize/);
+	assert.match(await response, /Location: https:\/\/ip\.net\.coffee\/claude\//);
 	await bridge.waitForProbe(100);
 	await bridge.close();
+});
+
+test('Claude proxy preflight prints checks and blocks startup on FAIL', async () => {
+	let output = '';
+	const failed = await runProxyPreflight(async () => [
+		{name: 'SOCKS5 认证', state: 'PASS', value: '通过'},
+		{name: 'Anthropic API', state: 'FAIL', value: '不可达'},
+	], text => { output += text; });
+	assert.equal(failed, false);
+	assert.match(output, /CPM 启动前检查/);
+	assert.match(output, /Anthropic API\s+FAIL\s+不可达/);
+	assert.equal(await runProxyPreflight(async () => [
+		{name: 'Anthropic API', state: 'PASS', value: 'HTTP 401'},
+	], () => {}), true);
 });
 
 test('runtime config reproduces every Claude proxy environment variable on port 17891', async () => {

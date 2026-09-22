@@ -10,6 +10,12 @@ import {VERSION} from '../src/version.js';
 
 test('remote toggle creates a cpm proxy shim and edits shell files', async () => {
 	const home = await mkdtemp(join(tmpdir(), 'cpm-toggle-'));
+	const nativeBin = join(home, 'native-bin');
+	await mkdir(join(home, '.local', 'bin'), {recursive: true});
+	await mkdir(nativeBin);
+	await writeFile(join(home, '.local', 'bin', 'cpm'), '#!/bin/sh\nprintf \'cpm:%s\\n\' "$*"\n', {mode: 0o755});
+	await writeFile(join(nativeBin, 'claude'), '#!/bin/sh\necho native-claude\n', {mode: 0o755});
+	await writeFile(join(home, '.bash_profile'), '# existing login config\n');
 	const previous = process.env.HOME;
 	process.env.HOME = home;
 	try {
@@ -17,9 +23,21 @@ test('remote toggle creates a cpm proxy shim and edits shell files', async () =>
 		const shim = join(home, '.local', 'share', 'cpm', 'shim-bin', 'claude');
 		assert.equal((await stat(shim)).mode & 0o777, 0o755);
 		assert.match(await readFile(shim, 'utf8'), /\.local\/bin\/cpm" proxy/);
-		assert.match(await readFile(join(home, '.profile'), 'utf8'), />>> cpm >>>/);
+		const profile = await readFile(join(home, '.profile'), 'utf8');
+		assert.match(profile, />>> cpm >>>/);
+		assert.match(profile, /claude\(\).*cpm" proxy/);
+		assert.match(await readFile(join(home, '.bash_profile'), 'utf8'), />>> cpm >>>/);
+		const enabled = spawnSync('sh', ['-c', '. "$HOME/.profile"; claude hello'], {
+			env: {...process.env, HOME: home, PATH: `${nativeBin}:/usr/bin:/bin`}, encoding: 'utf8',
+		});
+		assert.equal(enabled.status, 0, enabled.stderr);
+		assert.equal(enabled.stdout.trim(), 'cpm:proxy hello');
 		await toggleRemote(false);
 		assert.doesNotMatch(await readFile(join(home, '.profile'), 'utf8'), />>> cpm >>>/);
+		const disabled = spawnSync('sh', ['-c', '. "$HOME/.profile"; claude'], {
+			env: {...process.env, HOME: home, PATH: `${nativeBin}:/usr/bin:/bin`}, encoding: 'utf8',
+		});
+		assert.equal(disabled.stdout.trim(), 'native-claude');
 	} finally {
 		if (previous === undefined) delete process.env.HOME; else process.env.HOME = previous;
 	}

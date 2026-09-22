@@ -1,21 +1,15 @@
-import {spawn, type ChildProcessWithoutNullStreams} from 'node:child_process';
+import {spawn} from 'node:child_process';
 import {createReadStream} from 'node:fs';
 import {stat} from 'node:fs/promises';
 import type {HostProfile, RemoteStatus} from './types.js';
 import {validateHost} from './types.js';
 import {downloadOfficialClaude, type ClaudePlatform} from './official-claude.js';
 import {runtimeForRemote} from './runtime-distribution.js';
-import {openSecureBrowser, openSecureClaudeLogin, type SecureLoginBrowser} from './browser-login.js';
+import {openSecureBrowser} from './browser-login.js';
 import {VERSION} from './version.js';
 
 export type OperationProgress = {percent: number; label: string};
 export type ProgressReporter = (progress: OperationProgress) => void;
-
-export type RemoteLoginSession = {
-	authorizationUrl: string;
-	submit: (authorizationCode: string, reporter?: ProgressReporter) => Promise<void>;
-	cancel: () => Promise<void>;
-};
 
 export type BrowserSession = {
 	profileSource: string;
@@ -129,30 +123,6 @@ function proxyUrl(host: HostProfile, password: string): string {
 	const encodedPassword = encodeURIComponent(password);
 	const address = host.proxyHost.includes(':') ? `[${host.proxyHost}]` : host.proxyHost;
 	return `socks5h://${username}:${encodedPassword}@${address}:${host.proxyPort}`;
-}
-
-function stripTerminalCodes(value: string): string {
-	return value
-		.replaceAll(/\x1B\][^\x07]*(?:\x07|\x1B\\)/g, '')
-		.replaceAll(/\x1B\[[0-?]*[ -/]*[@-~]/g, '')
-		.replaceAll('\r', '');
-}
-
-function findAuthorizationUrl(value: string): string | undefined {
-	for (const found of stripTerminalCodes(value).matchAll(/https:\/\/[^\s<>"']+/g)) {
-		try {
-			const parsed = new URL(found[0]);
-			if (parsed.searchParams.has('state') && parsed.searchParams.has('code_challenge')) return parsed.toString();
-		} catch {}
-	}
-	return undefined;
-}
-
-function waitForChild(child: ChildProcessWithoutNullStreams): Promise<number> {
-	return new Promise((resolve, reject) => {
-		child.once('error', reject);
-		child.once('close', code => resolve(code ?? 1));
-	});
 }
 
 export class SSHClient {
@@ -331,102 +301,6 @@ export class SSHClient {
 		const status = await this.check(host, scoped(reporter, 90, 100));
 		report(reporter, 100, '安装、配置和验证全部完成');
 		return status;
-	}
-
-	public async beginLogin(host: HostProfile, password: string, reporter?: ProgressReporter): Promise<RemoteLoginSession> {
-		if (process.platform !== 'darwin') throw new Error('远端 Claude 安全登录目前只支持从 macOS 发起');
-		validateHost(host, true);
-		if (!password || /[\r\n]/.test(password)) throw new Error('代理密码不能为空且不能包含换行');
-		report(reporter, 8, `正在通过 SSH 连接 ${host.name}`);
-		const environment = await this.remoteEnvironment(host);
-		report(reporter, 24, `登录环境：${environment.timezone} / ${environment.locale}`);
-
-		const controller = new AbortController();
-		const child = spawn('ssh', [
-			'-tt',
-			'-o', 'BatchMode=yes',
-			'-o', `ConnectTimeout=${this.connectTimeoutSeconds}`,
-			'--', host.sshHost,
-			'stty cols 4096 2>/dev/null || true; exec "$HOME/.local/bin/cpm" proxy auth login --claudeai',
-		], {stdio: ['pipe', 'pipe', 'pipe'], signal: controller.signal}) as ChildProcessWithoutNullStreams;
-		let output = '';
-		let browser: SecureLoginBrowser | undefined;
-		let finished = false;
-		const exited = waitForChild(child).catch(error => {
-			output = (output + `\n${(error as Error).message}`).slice(-131_072);
-			return 1;
-		}).finally(() => { finished = true; });
-		child.stdout.on('data', chunk => { output = (output + Buffer.from(chunk).toString('utf8')).slice(-131_072); });
-		child.stderr.on('data', chunk => { output = (output + Buffer.from(chunk).toString('utf8')).slice(-131_072); });
-		report(reporter, 36, '正在等待远端 Claude 生成官方登录链接');
-
-		let authorizationUrl = '';
-		const startedAt = Date.now();
-		while (!authorizationUrl && !finished && Date.now() - startedAt < 60_000) {
-			authorizationUrl = findAuthorizationUrl(output) || '';
-			if (!authorizationUrl) await new Promise(resolve => setTimeout(resolve, 100));
-		}
-		authorizationUrl ||= findAuthorizationUrl(output) || '';
-		if (!authorizationUrl) {
-			controller.abort();
-			await exited.catch(() => 1);
-			throw new Error(finished ? '远端 Claude 未返回登录链接' : '等待远端 Claude 登录链接超时');
-		}
-
-		try {
-			report(reporter, 55, '正在等待 macOS 管理员授权，并用原 Profile 启动 Google Chrome');
-			browser = await openSecureClaudeLogin({
-				authorizationUrl,
-				proxyUrl: proxyUrl(host, password),
-				timezone: environment.timezone,
-				locale: environment.locale,
-			});
-			report(reporter, 100, browser.timezoneChanged
-				? `Chrome 已通过 CPM 探针和 SOCKS5 隧道；使用 ${browser.profileSource}，macOS 时区已从 ${browser.originalTimezone} 临时切换到 ${environment.timezone}`
-				: `Chrome 已通过 CPM 探针和 SOCKS5 隧道；使用 ${browser.profileSource} 与原有 Cookie`);
-		} catch (error) {
-			controller.abort();
-			await exited.catch(() => 1);
-			throw error;
-		}
-
-		let settled = false;
-		const cleanup = async (): Promise<void> => {
-			await browser?.close();
-			browser = undefined;
-		};
-		return {
-			authorizationUrl,
-			submit: async (authorizationCode, submitReporter) => {
-				if (settled) throw new Error('该登录会话已经结束');
-				const code = authorizationCode.trim();
-				if (!code || code.length > 8_192 || /[\r\n\0]/.test(code)) throw new Error('授权码为空或格式无效');
-				settled = true;
-				report(submitReporter, 15, '正在通过 SSH 标准输入提交授权码');
-				child.stdin.end(`${code}\r`);
-				const timeout = setTimeout(() => controller.abort(), 120_000);
-				try {
-					const exitCode = await exited;
-					if (exitCode !== 0) throw new Error(`远端 Claude 登录失败，退出码 ${exitCode}`);
-					report(submitReporter, 75, '正在验证远端 Claude 登录状态');
-					const raw = stripTerminalCodes(await this.run(host.sshHost, 'exec "$HOME/.local/bin/cpm" proxy auth status', '', 60_000));
-					if (!/"loggedIn"\s*:\s*true/.test(raw)) throw new Error('授权流程已结束，但远端 Claude 没有报告已登录');
-					report(submitReporter, 100, '远端 Claude 登录成功');
-				} finally {
-					clearTimeout(timeout);
-					await cleanup();
-				}
-			},
-			cancel: async () => {
-				if (!settled) {
-					settled = true;
-					try { child.stdin.end('\x03'); } catch {}
-				}
-				controller.abort();
-				await exited.catch(() => 1);
-				await cleanup();
-			},
-		};
 	}
 
 	public async openBrowser(host: HostProfile, password: string, reporter?: ProgressReporter): Promise<BrowserSession> {
