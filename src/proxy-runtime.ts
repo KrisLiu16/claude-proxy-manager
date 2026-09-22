@@ -311,7 +311,7 @@ async function readHttpHead(client: Socket): Promise<{head: Buffer; rest: Buffer
 	});
 }
 
-async function handleProxyClient(client: Socket, proxyUrl: string, healthToken: string): Promise<void> {
+async function handleProxyClient(client: Socket, proxyUrl: string, healthToken: string, onHealth?: () => void, healthRedirect?: string, onTunnel?: () => void): Promise<void> {
 	let upstream: Socket | undefined;
 	client.once('close', () => upstream?.destroy());
 	try {
@@ -320,18 +320,25 @@ async function handleProxyClient(client: Socket, proxyUrl: string, healthToken: 
 		const [method = '', target = '', protocol = ''] = (lines.shift() || '').split(' ');
 		if (!method || !target || !protocol) throw new Error('HTTP 请求行无效');
 		if (method === 'GET' && target === `http://cpm.internal/__health/${healthToken}`) {
-			client.end(`HTTP/1.1 200 OK\r\nContent-Length: ${healthToken.length}\r\nConnection: close\r\n\r\n${healthToken}`);
+			onHealth?.();
+			if (healthRedirect) {
+				client.end(`HTTP/1.1 302 Found\r\nLocation: ${healthRedirect}\r\nContent-Length: 0\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n`);
+			} else {
+				client.end(`HTTP/1.1 200 OK\r\nContent-Length: ${healthToken.length}\r\nConnection: close\r\n\r\n${healthToken}`);
+			}
 			return;
 		}
 		if (method.toUpperCase() === 'CONNECT') {
 			const [host, port] = splitHostPort(target, 443);
 			upstream = await socksConnect(proxyUrl, host, port);
+			onTunnel?.();
 			client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
 			if (rest.length) upstream.write(rest);
 		} else {
 			const url = new URL(target);
 			if (url.protocol !== 'http:') throw new Error('仅支持 HTTP 绝对地址或 CONNECT');
 			upstream = await socksConnect(proxyUrl, url.hostname, Number(url.port || 80));
+			onTunnel?.();
 			const filtered = lines.filter(line => !/^(proxy-connection|proxy-authorization|connection|keep-alive):/i.test(line));
 			if (!filtered.some(line => /^host:/i.test(line))) filtered.push('Host: ' + url.host);
 			const path = `${url.pathname || '/'}${url.search}`;
@@ -347,6 +354,9 @@ async function handleProxyClient(client: Socket, proxyUrl: string, healthToken: 
 
 export type EphemeralBridge = {
 	port: number;
+	probeUrl: string;
+	waitForProbe: (timeoutMs?: number) => Promise<void>;
+	waitForTunnel: (timeoutMs?: number) => Promise<void>;
 	close: () => Promise<void>;
 };
 
@@ -354,13 +364,29 @@ export type EphemeralBridge = {
  * Starts a loopback-only HTTP to SOCKS5 bridge without writing the proxy URL
  * or its credentials to disk. This is used by the short-lived login browser.
  */
-export async function startEphemeralBridge(proxyUrl: string): Promise<EphemeralBridge> {
+export async function startEphemeralBridge(proxyUrl: string, healthRedirect?: string): Promise<EphemeralBridge> {
 	parseProxy(proxyUrl);
+	if (healthRedirect && /[\r\n]/.test(healthRedirect)) throw new Error('浏览器探针跳转地址无效');
 	const sockets = new Set<Socket>();
+	const healthToken = randomBytes(24).toString('hex');
+	let probed = false;
+	const probeWaiters = new Set<() => void>();
+	let tunneled = false;
+	const tunnelWaiters = new Set<() => void>();
+	const markProbed = () => {
+		probed = true;
+		for (const resolve of probeWaiters) resolve();
+		probeWaiters.clear();
+	};
+	const markTunneled = () => {
+		tunneled = true;
+		for (const resolve of tunnelWaiters) resolve();
+		tunnelWaiters.clear();
+	};
 	const server = net.createServer(client => {
 		sockets.add(client);
 		client.once('close', () => sockets.delete(client));
-		void handleProxyClient(client, proxyUrl, 'browser-login-no-health-endpoint');
+		void handleProxyClient(client, proxyUrl, healthToken, markProbed, healthRedirect, markTunneled);
 	});
 	await new Promise<void>((resolve, reject) => {
 		server.once('error', reject);
@@ -370,6 +396,29 @@ export async function startEphemeralBridge(proxyUrl: string): Promise<EphemeralB
 	let closed = false;
 	return {
 		port: address.port,
+		probeUrl: `http://cpm.internal/__health/${healthToken}`,
+		waitForProbe: async (timeoutMs = 10_000) => {
+			if (probed) return;
+			await new Promise<void>((resolve, reject) => {
+				const timer = setTimeout(() => {
+					probeWaiters.delete(done);
+					reject(new Error('Chrome 未连接 CPM 本机代理；请确认已用 ⌘Q 完全退出所有 Chrome 后重试'));
+				}, timeoutMs);
+				const done = () => { clearTimeout(timer); resolve(); };
+				probeWaiters.add(done);
+			});
+		},
+		waitForTunnel: async (timeoutMs = 15_000) => {
+			if (tunneled) return;
+			await new Promise<void>((resolve, reject) => {
+				const timer = setTimeout(() => {
+					tunnelWaiters.delete(done);
+					reject(new Error('Chrome 已连接 CPM，但无法通过所配置的 SOCKS5 代理建立 HTTPS 隧道'));
+				}, timeoutMs);
+				const done = () => { clearTimeout(timer); resolve(); };
+				tunnelWaiters.add(done);
+			});
+		},
 		close: async () => {
 			if (closed) return;
 			closed = true;

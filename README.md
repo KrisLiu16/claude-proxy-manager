@@ -27,7 +27,7 @@ curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main
 安装指定版本：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main/install.sh | CPM_VERSION=v0.5.3 sh
+curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main/install.sh | CPM_VERSION=v0.5.4 sh
 ```
 
 安装器支持 Linux/macOS 的 x64 和 arm64，验证 Release 资产的 SHA-256，默认写入 `~/.local/bin/cpm`。可用以下变量调整：
@@ -35,7 +35,7 @@ curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main
 ```text
 CPM_INSTALL_DIR=/custom/bin
 CPM_NO_MODIFY_PATH=1
-CPM_VERSION=v0.5.3
+CPM_VERSION=v0.5.4
 ```
 
 ## 工作方式
@@ -90,14 +90,19 @@ q    退出
 先用 `⌘Q` 完全退出 Google Chrome，按 `s` 完成远端设置，再按 `l` 登录远端 Claude。CPM 会让远端 `claude auth login` 保持等待，并使用本机安装的正式 Google Chrome：
 
 - 浏览器流量经本机随机回环端口转入该机器配置的 SOCKS5 代理，代理凭据只保存在 CPM 内存中
-- 直接使用最近打开的原 Chrome Profile，现有 Cookie、Local Storage、扩展和登录状态原生生效，不复制或解密 Cookie
+- 直接使用最近打开的原 Chrome Profile，现有 Cookie、Local Storage 和登录状态原生生效，不复制或解密 Cookie
+- Cookie 和站点状态来自原 Profile；扩展在本次登录中禁用，避免代理扩展或 PAC 把部分域名改成直连
+- 本次使用独立空缓存目录，避免 IP 检测网站读到原 Profile 中缓存的旧出口结果
 - 使用启动参数设置浏览器语言；登录前经 macOS 管理员授权临时切换系统时区，正常完成或取消后再恢复原时区
 - 登录浏览器强制全量走代理，不继承 `NO_PROXY`，避免认证域名因白名单误配而直连
-- 禁用 QUIC 与非代理 WebRTC，减少绕过代理的网络路径
+- 整个 Chrome 实例的 HTTP/HTTPS 流量使用 CPM 本机代理，并禁用 DNS 预取、QUIC 与非代理 WebRTC UDP
+- Chrome 首先访问随机的 `cpm.internal` 探针；只有 CPM bridge 收到请求并通过所配置的 SOCKS5 成功建立 HTTPS 隧道才继续，任一步失败都会关闭并报错
 - 只打开经过校验的 Claude 官方 HTTPS OAuth 链接，链接不会保留在 Chrome 的启动命令行中
 - CPM 不读取登录页面，也不自动提取授权码
 
 用户在浏览器完成登录后，把页面显示的授权码粘贴到 TUI 的掩码输入框并按 Enter。授权码只经当前 SSH 会话的标准输入回填，不写入文件或命令行参数。登录结束或取消后，本次 Chrome 与本机代理会关闭。因为 Chrome 必须完全退出后才能让新的进程级代理参数生效，检测到 Chrome 已运行时 CPM 会拒绝启动并给出提示。
+
+需要人工确认时，可在该 Chrome 实例中新开标签访问 `https://ip.net.coffee/claude/`。中国出口 IPv4、Cloudflare 出口和 Claude AI 出口应一致，WebRTC UDP 项不应显示不同的公网 IP。独立空缓存会避免读取原 Profile 中旧的 IP 检测结果。
 
 如果 CPM、Chrome 或 macOS 在登录期间异常终止，自动恢复步骤可能来不及执行，此时需要用户在 macOS“日期与时间”设置中手动改回原时区。
 

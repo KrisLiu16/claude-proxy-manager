@@ -79,9 +79,25 @@ test('ephemeral browser bridge listens on loopback and forwards CONNECT through 
 	client.write('CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: api.anthropic.com:443\r\n\r\n');
 	assert.match(await response, /^HTTP\/1\.1 200/);
 	assert.equal(requested, 'api.anthropic.com');
+	await bridge.waitForTunnel(100);
 	client.destroy();
 	await bridge.close();
 	await new Promise<void>(resolve => upstream.close(() => resolve()));
+});
+
+test('browser probe proves Chrome reached the CPM bridge before OAuth redirect', async () => {
+	const redirect = 'https://claude.com/cai/oauth/authorize?state=abc&code_challenge=xyz';
+	const bridge = await startEphemeralBridge('socks5h://alice:secret@127.0.0.1:9', redirect);
+	const client = net.createConnection({host: '127.0.0.1', port: bridge.port});
+	const response = new Promise<string>((resolve, reject) => {
+		client.once('data', chunk => resolve(chunk.toString('latin1')));
+		client.once('error', reject);
+	});
+	client.end(`GET ${bridge.probeUrl} HTTP/1.1\r\nHost: cpm.internal\r\nConnection: close\r\n\r\n`);
+	assert.match(await response, /^HTTP\/1\.1 302 Found/);
+	assert.match(await response, /Location: https:\/\/claude\.com\/cai\/oauth\/authorize/);
+	await bridge.waitForProbe(100);
+	await bridge.close();
 });
 
 test('runtime config reproduces every Claude proxy environment variable on port 17891', async () => {

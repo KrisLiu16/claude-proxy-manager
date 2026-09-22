@@ -1,7 +1,7 @@
 import {spawn, type ChildProcess} from 'node:child_process';
-import {access, readFile} from 'node:fs/promises';
+import {access, mkdtemp, readFile, rm} from 'node:fs/promises';
 import {constants as fsConstants} from 'node:fs';
-import {homedir} from 'node:os';
+import {homedir, tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {startEphemeralBridge, type EphemeralBridge} from './proxy-runtime.js';
 import {acquireMacTimezone, type MacTimezoneLease} from './mac-timezone.js';
@@ -58,6 +58,22 @@ export async function lastUsedChromeProfile(chromeRoot = CHROME_ROOT): Promise<s
 	return 'Default';
 }
 
+export function chromeNetworkArguments(port: number, locale: string, cacheDir: string): string[] {
+	return [
+		'--disable-extensions',
+		'--disable-quic',
+		'--dns-prefetch-disable',
+		'--disable-features=MediaRouter',
+		'--webrtc-ip-handling-policy=disable_non_proxied_udp',
+		'--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
+		`--proxy-server=http://127.0.0.1:${port}`,
+		'--proxy-bypass-list=<-loopback>',
+		`--disk-cache-dir=${cacheDir}`,
+		'--disk-cache-size=1',
+		`--lang=${locale}`,
+	];
+}
+
 function processExit(child: ChildProcess): Promise<number> {
 	return new Promise(resolve => {
 		child.once('error', () => resolve(1));
@@ -68,11 +84,6 @@ function processExit(child: ChildProcess): Promise<number> {
 async function isChromeRunning(): Promise<boolean> {
 	const child = spawn('pgrep', ['-x', 'Google Chrome'], {stdio: 'ignore'});
 	return await processExit(child) === 0;
-}
-
-async function openUrlInChrome(url: string): Promise<void> {
-	const child = spawn('/usr/bin/open', ['-a', 'Google Chrome', url], {stdio: 'ignore'});
-	if (await processExit(child) !== 0) throw new Error('macOS 无法把 Claude 登录链接交给 Google Chrome');
 }
 
 async function waitForExit(child: ChildProcess): Promise<void> {
@@ -93,24 +104,20 @@ export async function openSecureClaudeLogin(options: SecureBrowserOptions): Prom
 
 	let bridge: EphemeralBridge | undefined;
 	let timezone: MacTimezoneLease | undefined;
+	let cacheDir = '';
 	let child: ChildProcess | undefined;
 	let killWithParent: (() => void) | undefined;
 	try {
 		const profileName = await lastUsedChromeProfile();
-		bridge = await startEphemeralBridge(options.proxyUrl);
+		bridge = await startEphemeralBridge(options.proxyUrl, authorizationUrl.toString());
 		timezone = await acquireMacTimezone(options.timezone);
+		cacheDir = await mkdtemp(join(tmpdir(), 'cpm-chrome-cache-'));
 		child = spawn(CHROME_PATH, [
 			`--profile-directory=${profileName}`,
 			'--no-first-run',
 			'--no-default-browser-check',
-			'--disable-quic',
-			'--dns-prefetch-disable',
-			'--disable-features=MediaRouter',
-			'--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
-			`--proxy-server=http://127.0.0.1:${bridge.port}`,
-			'--proxy-bypass-list=<-loopback>',
-			`--lang=${locale}`,
-			'about:blank',
+			...chromeNetworkArguments(bridge.port, locale, cacheDir),
+			bridge.probeUrl,
 		], {
 			stdio: ['ignore', 'ignore', 'pipe'],
 			env: {...process.env, TZ: options.timezone, LANG: options.locale},
@@ -130,7 +137,8 @@ export async function openSecureClaudeLogin(options: SecureBrowserOptions): Prom
 				throw new Error(detail || `Google Chrome 启动失败，退出码 ${code}`);
 			}),
 		]);
-		await openUrlInChrome(authorizationUrl.toString());
+		await bridge.waitForProbe(10_000);
+		await bridge.waitForTunnel(15_000);
 		let closed = false;
 		return {
 			profileSource: profileName,
@@ -143,7 +151,8 @@ export async function openSecureClaudeLogin(options: SecureBrowserOptions): Prom
 				if (child && child.exitCode === null) child.kill('SIGTERM');
 				if (child) await waitForExit(child);
 				await bridge?.close();
-				await timezone?.restore();
+				try { await timezone?.restore(); }
+				finally { if (cacheDir) await rm(cacheDir, {recursive: true, force: true}); }
 			},
 		};
 	} catch (error) {
@@ -151,7 +160,8 @@ export async function openSecureClaudeLogin(options: SecureBrowserOptions): Prom
 		if (child && child.exitCode === null) child.kill('SIGTERM');
 		if (child) await waitForExit(child);
 		await bridge?.close();
-		await timezone?.restore();
+		try { await timezone?.restore(); }
+		finally { if (cacheDir) await rm(cacheDir, {recursive: true, force: true}); }
 		throw error;
 	}
 }

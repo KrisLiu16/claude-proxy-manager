@@ -3,7 +3,7 @@ import {mkdtemp, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import test from 'node:test';
-import {browserLocale, lastUsedChromeProfile, validateClaudeAuthorizationUrl} from '../src/browser-login.js';
+import {browserLocale, chromeNetworkArguments, lastUsedChromeProfile, validateClaudeAuthorizationUrl} from '../src/browser-login.js';
 
 test('Claude login URL requires an official HTTPS host and OAuth protections', () => {
 	const valid = validateClaudeAuthorizationUrl('https://claude.com/cai/oauth/authorize?state=abc&code_challenge=xyz');
@@ -33,4 +33,16 @@ test('Chrome profile selection follows the last-used original profile', async ()
 	assert.equal(await lastUsedChromeProfile(root), 'Profile 2');
 	await writeFile(join(root, 'Local State'), JSON.stringify({profile: {last_used: '../../Other'}}));
 	assert.equal(await lastUsedChromeProfile(root), 'Default');
+});
+
+test('Chrome login arguments force HTTP proxy and block common direct paths', () => {
+	const args = chromeNetworkArguments(43210, 'en-US', '/tmp/empty-cache');
+	assert.ok(args.includes('--proxy-server=http://127.0.0.1:43210'));
+	assert.ok(args.includes('--proxy-bypass-list=<-loopback>'));
+	assert.ok(args.includes('--disable-extensions'));
+	assert.ok(args.includes('--disable-quic'));
+	assert.ok(args.includes('--dns-prefetch-disable'));
+	assert.ok(args.includes('--webrtc-ip-handling-policy=disable_non_proxied_udp'));
+	assert.ok(args.includes('--force-webrtc-ip-handling-policy=disable_non_proxied_udp'));
+	assert.ok(args.includes('--disk-cache-dir=/tmp/empty-cache'));
 });

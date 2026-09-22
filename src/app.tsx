@@ -363,7 +363,9 @@ export function App({initialHosts, store, secrets, ssh, platform = process.platf
 		return <Box flexDirection="column">
 			<Text bold color="cyan">远端 Claude 安全登录</Text>
 			<Text>已用正式 Google Chrome 和原 Profile 打开官方登录页，原有 Cookie 与站点状态会直接生效。</Text>
-			<Text dimColor>本次 Chrome 强制走开发机代理；macOS 时区会临时匹配出口并在结束后恢复。CPM 不读取网页或自动获取授权码。</Text>
+			<Text color="green">✓ Chrome 已命中 CPM 本机探针，并通过所配置的 SOCKS5 建立了 HTTPS 隧道。</Text>
+			<Text dimColor>整个 Chrome 实例强制走开发机代理，禁用扩展、旧缓存、QUIC 和非代理 UDP；时区结束后恢复。</Text>
+			<Text dimColor>可在新标签打开 https://ip.net.coffee/claude/ 验证，三个出口 IP 应一致且 WebRTC 不应泄露。</Text>
 			<Box marginTop={1}>
 				<Text color="cyan">授权码: </Text>
 				<TextInput

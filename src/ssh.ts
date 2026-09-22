@@ -374,8 +374,8 @@ export class SSHClient {
 				locale: environment.locale,
 			});
 			report(reporter, 100, browser.timezoneChanged
-				? `登录页已打开，使用 Chrome ${browser.profileSource}；macOS 时区已临时从 ${browser.originalTimezone} 切换到 ${environment.timezone}`
-				: `登录页已打开，直接使用 Chrome ${browser.profileSource} 与原有 Cookie`);
+				? `Chrome 已通过 CPM 探针和 SOCKS5 隧道；使用 ${browser.profileSource}，macOS 时区已从 ${browser.originalTimezone} 临时切换到 ${environment.timezone}`
+				: `Chrome 已通过 CPM 探针和 SOCKS5 隧道；使用 ${browser.profileSource} 与原有 Cookie`);
 		} catch (error) {
 			controller.abort();
 			await exited.catch(() => 1);
