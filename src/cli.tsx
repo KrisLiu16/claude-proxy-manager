@@ -13,7 +13,7 @@ const program = new Command();
 program
 	.name('cpm')
 	.description('通过 SSH 管理远端开发机的 claude-proxy')
-	.version('0.1.3')
+	.version('0.1.4')
 	.option('--config <path>', '本地配置文件路径');
 
 async function context(): Promise<{
@@ -50,10 +50,10 @@ program.command('check <name>').description('检查远端状态和代理连通�
 	console.log(statusSummary(await ssh.check(findHost(hosts, String(name)))));
 });
 
-program.command('install <name>').description('安装或更新远端启动器').action(async name => {
+program.command('install <name>').description('检查并安装官方 Claude 与代理启动器').action(async name => {
 	const {hosts, ssh} = await context();
 	await ssh.install(findHost(hosts, String(name)));
-	console.log('启动器安装完成');
+	console.log('Claude 与代理启动器已就绪');
 });
 
 program.command('setup <name>').description('安装、配置并应用默认替换开关').action(async name => {

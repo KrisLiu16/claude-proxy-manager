@@ -73,6 +73,28 @@ test('check script returns a redacted launcher error', async () => {
 	assert.equal(status.proxyError.includes('test-password'), false);
 });
 
+test('Claude probe detects a missing binary and installer places the streamed executable', async () => {
+	const home = await mkdtemp(join(tmpdir(), 'cpm-claude-install-'));
+	const probe = spawnSync('sh', ['-s'], {
+		input: scriptsForTest.claudeProbeScript,
+		env: {...process.env, HOME: home, PATH: '/usr/bin:/bin'},
+		encoding: 'utf8',
+	});
+	assert.equal(probe.status, 0, probe.stderr);
+	assert.match(probe.stdout, /^claude_path=$/m);
+	assert.match(probe.stdout, /^platform=linux-(x64|arm64)(-musl)?$/m);
+
+	const fakeClaude = '#!/bin/sh\necho "9.9.9 (Claude Code)"\n';
+	const installed = spawnSync('sh', ['-c', scriptsForTest.installClaudeScript], {
+		input: fakeClaude,
+		env: {...process.env, HOME: home},
+		encoding: 'utf8',
+	});
+	assert.equal(installed.status, 0, installed.stderr);
+	assert.match(installed.stdout, /claude_version=9\.9\.9 \(Claude Code\)/);
+	assert.equal(await readFile(join(home, '.local', 'bin', 'claude'), 'utf8'), fakeClaude);
+});
+
 test('embedded remote scripts pass syntax checks', () => {
 	const launcher = resolve('assets/claude-proxy');
 	const bridge = resolve('assets/socks_http_bridge.py');

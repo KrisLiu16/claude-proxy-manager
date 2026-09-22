@@ -5,6 +5,7 @@
 ## 功能
 
 - 检查远端是否安装 `claude-proxy`、bridge 和私有配置文件
+- 缺少 Claude Code 时，从 Anthropic 官方 npm 平台包校验并安装原生二进制
 - 一键安装或更新启动器与 HTTP → SOCKS5 bridge
 - 每台机器独立设置 SOCKS5 地址、账号、密码和 `NO_PROXY`
 - 检查代理实际连通性
@@ -26,11 +27,18 @@
 
 GitHub Release 分发的是本机运行的 `cpm` 单文件程序。GitHub Actions 使用 Bun 从本仓库的 TypeScript 源码构建它。
 
-开发机上的组件不从 GitHub 下载。执行 `cpm install` 或 TUI 中的安装操作时，链路是：
+开发机上的组件不从 GitHub 或 npm 下载。执行 `cpm install` 或 TUI 中的安装操作时，链路是：
 
 ```text
 本机 cpm
+  ├─ 通过 SSH 检查开发机上的真实 claude
+  ├─ 缺失时：本机访问 registry.npmjs.org
+  │   ├─ 读取 @anthropic-ai/claude-code 的 latest 元数据
+  │   ├─ 选择开发机平台对应的 @anthropic-ai/claude-code-* 包
+  │   ├─ 下载 tarball 并核对 npm 的 SHA-512 integrity
+  │   └─ 只提取 package/claude
   └─ 系统 ssh（读取 ~/.ssh/config 和 SSH agent）
+      ├─ 写入 ~/.local/bin/claude
       ├─ 写入 ~/.local/bin/claude-proxy
       └─ 写入 ~/.local/share/claude-proxy/socks_http_bridge.py
 ```
@@ -39,7 +47,8 @@ GitHub Release 分发的是本机运行的 `cpm` 单文件程序。GitHub Action
 
 - `claude-proxy` 是仓库 [`assets/claude-proxy`](assets/claude-proxy) 中的 POSIX shell 启动脚本，不是外部二进制。
 - `socks_http_bridge.py` 是仓库 [`assets/socks_http_bridge.py`](assets/socks_http_bridge.py) 中的 Python bridge。
-- 真正的 Claude Code CLI 由开发机原先安装。部署时记录它的绝对路径为 `CLAUDE_BIN`；`cpm` 不下载或替换官方 Claude 二进制。
+- 开发机已有真实 Claude Code CLI 时，`cpm` 保留它并记录绝对路径为 `CLAUDE_BIN`。
+- 开发机缺失时，`cpm` 按 Aster 脚手架同步使用的 npm 平台包算法在本机取得官方原生二进制，再通过 SSH 标准输入上传；远端不需要公网访问。
 
 远端检查失败时，`cpm` 会回传 `claude-proxy --check` 的输出并显示在 `代理=FAILED` 下方。回传前会对 SOCKS5 URL 中的用户名和密码脱敏。
 
@@ -47,15 +56,14 @@ GitHub Release 分发的是本机运行的 `cpm` 单文件程序。GitHub Action
 
 本机：
 
-- Node.js 22 或更高版本
 - OpenSSH 客户端
+- `tar`（缺少 Claude 时提取官方 npm 平台包）
 - 已在 `~/.ssh/config`、SSH agent 或密钥文件中配置免交互登录
 
 远端开发机：
 
 - Linux、POSIX shell
 - `python3`、`curl`、`base64`
-- 已安装 Claude Code CLI
 
 SSH 操作使用 `BatchMode=yes`，不会在 TUI 中询问 SSH 密码。
 
@@ -70,7 +78,7 @@ curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main
 安装指定版本：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main/install.sh | CPM_VERSION=v0.1.3 sh
+curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main/install.sh | CPM_VERSION=v0.1.4 sh
 ```
 
 安装器支持 Linux/macOS 的 x64 和 arm64，下载 GitHub Release 中的单文件可执行程序，并在安装前验证 SHA-256。连接终端时会显示实时进度条、百分比和 MiB；CI 或重定向输出时使用无控制字符的纯文本状态行。
@@ -80,10 +88,12 @@ curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main
 ```text
 CPM_INSTALL_DIR=/custom/bin   自定义安装目录
 CPM_NO_MODIFY_PATH=1         不修改 shell 配置
-CPM_VERSION=v0.1.3           安装固定版本
+CPM_VERSION=v0.1.4           安装固定版本
 ```
 
 开发环境：
+
+开发源码需要 Node.js 22 或更高版本。
 
 ```bash
 npm install
@@ -99,7 +109,7 @@ cpm
 a    添加机器
 e    编辑机器
 c    检查远端状态
-i    只安装/更新启动器
+i    检查并安装官方 Claude、代理启动器和 bridge
 s    一键安装、写配置、应用默认替换并验证
 t    切换 claude → claude-proxy
 d    删除本地配置（需按两次，不删除远端文件）
@@ -136,7 +146,7 @@ naiveai-dev.com,.naiveai-dev.com,10.34.8.92
 ```bash
 cpm list
 cpm check dev
-cpm install dev
+cpm install dev      # 缺 Claude 时自动安装官方平台包
 cpm setup dev
 cpm enable dev
 cpm disable dev

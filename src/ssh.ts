@@ -1,7 +1,9 @@
 import {spawn} from 'node:child_process';
+import {createReadStream} from 'node:fs';
 import type {HostProfile, RemoteStatus} from './types.js';
 import {validateHost} from './types.js';
 import {bridgeBase64, launcherBase64} from './embedded-assets.js';
+import {downloadOfficialClaude, type ClaudePlatform} from './official-claude.js';
 
 const checkScript = String.raw`set -eu
 config="$HOME/.config/claude-proxy/config"
@@ -15,13 +17,29 @@ if [ -f "$config" ]; then
   mode=$(stat -c '%a' "$config" 2>/dev/null || stat -f '%Lp' "$config" 2>/dev/null || echo unknown)
   printf 'config_mode=%s\n' "$mode"
   grep -Eq '^SOCKS5_PROXY=socks5h?://' "$config" && echo proxy_configured=yes || echo proxy_configured=no
-  awk 'index($0,"CLAUDE_BIN=")==1 {print "real_claude=" substr($0,12); exit}' "$config"
   awk 'index($0,"NO_PROXY=")==1 {print "no_proxy=" substr($0,10); exit}' "$config"
 else
   echo config=no
   echo config_mode=-
   echo proxy_configured=no
 fi
+real_claude=""
+if [ -f "$config" ]; then
+  real_claude=$(awk 'index($0,"CLAUDE_BIN=")==1 {print substr($0,12); exit}' "$config")
+  [ -x "$real_claude" ] || real_claude=""
+fi
+if [ -z "$real_claude" ]; then
+  candidate=$(command -v claude 2>/dev/null || true)
+  case "$candidate" in */.local/share/claude-proxy/shim-bin/claude) candidate="" ;; esac
+  [ -z "$candidate" ] || real_claude="$candidate"
+fi
+[ -n "$real_claude" ] || [ ! -x "$HOME/.local/bin/claude" ] || real_claude="$HOME/.local/bin/claude"
+if [ -z "$real_claude" ]; then
+  for candidate in /usr/local/bin/claude /usr/bin/claude; do
+    [ ! -x "$candidate" ] || { real_claude="$candidate"; break; }
+  done
+fi
+printf 'real_claude=%s\n' "$real_claude"
 if grep -q '>>> claude-proxy-manager >>>' "$HOME/.profile" "$HOME/.bashrc" "$HOME/.zshrc" 2>/dev/null; then
   echo replace_claude=yes
 else
@@ -129,6 +147,57 @@ for name in sys.argv[2:]:
 PY
 `;
 
+const claudeProbeScript = String.raw`set -eu
+config="$HOME/.config/claude-proxy/config"
+claude_path=""
+if [ -f "$config" ]; then
+  claude_path=$(awk 'index($0,"CLAUDE_BIN=")==1 {print substr($0,12); exit}' "$config")
+  [ -x "$claude_path" ] || claude_path=""
+fi
+if [ -z "$claude_path" ]; then
+  candidate=$(command -v claude 2>/dev/null || true)
+  case "$candidate" in */.local/share/claude-proxy/shim-bin/claude) candidate="" ;; esac
+  [ -z "$candidate" ] || claude_path="$candidate"
+fi
+[ -n "$claude_path" ] || [ ! -x "$HOME/.local/bin/claude" ] || claude_path="$HOME/.local/bin/claude"
+if [ -z "$claude_path" ]; then
+  for candidate in /usr/local/bin/claude /usr/bin/claude; do
+    [ ! -x "$candidate" ] || { claude_path="$candidate"; break; }
+  done
+fi
+printf 'claude_path=%s\n' "$claude_path"
+case "$(uname -s)-$(uname -m)" in
+  Linux-x86_64|Linux-amd64) platform=linux-x64 ;;
+  Linux-aarch64|Linux-arm64) platform=linux-arm64 ;;
+  Darwin-x86_64) platform=darwin-x64 ;;
+  Darwin-arm64) platform=darwin-arm64 ;;
+  *) echo "unsupported=$(uname -s)-$(uname -m)"; exit 0 ;;
+esac
+case "$platform" in
+  linux-*)
+    if [ -e /etc/alpine-release ] || (ldd --version 2>&1 || true) | grep -qi musl; then
+      platform="$platform-musl"
+    fi
+    ;;
+esac
+printf 'platform=%s\n' "$platform"
+`;
+
+const installClaudeScript = String.raw`set -eu
+mkdir -p "$HOME/.local/bin"
+target="$HOME/.local/bin/claude"
+tmp="$target.cpm.$$"
+cleanup() { rm -f "$tmp"; }
+trap cleanup EXIT HUP INT TERM
+cat > "$tmp"
+chmod 755 "$tmp"
+reported=$("$tmp" --version 2>&1) || { printf '%s\n' "$reported" >&2; exit 4; }
+mv "$tmp" "$target"
+trap - EXIT HUP INT TERM
+printf 'claude_path=%s\n' "$target"
+printf 'claude_version=%s\n' "$reported"
+`;
+
 function shellQuote(value: string): string {
 	return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
@@ -151,6 +220,9 @@ export class SSHClient {
 				const stderr: Buffer[] = [];
 				child.stdout.on('data', chunk => stdout.push(Buffer.from(chunk)));
 				child.stderr.on('data', chunk => stderr.push(Buffer.from(chunk)));
+				child.stdin.on('error', error => {
+					if ((error as NodeJS.ErrnoException).code !== 'EPIPE') reject(error);
+				});
 				child.on('error', error => reject(error));
 				child.on('close', code => {
 					if (code === 0) resolve(Buffer.concat(stdout).toString('utf8'));
@@ -160,6 +232,50 @@ export class SSHClient {
 			});
 		} catch (error) {
 			if ((error as Error).name === 'AbortError') throw new Error(`连接或远端操作超时: ${host}`);
+			throw error;
+		} finally {
+			clearTimeout(timer);
+		}
+	}
+
+	private async runFile(host: string, command: string, path: string, timeoutMs: number): Promise<string> {
+		if (!host || host.startsWith('-') || /\s/.test(host)) throw new Error('无效的 SSH 主机');
+		const controller = new AbortController();
+		const timer = setTimeout(() => controller.abort(), timeoutMs);
+		try {
+			return await new Promise((resolve, reject) => {
+				let settled = false;
+				const finish = (error?: Error, output = '') => {
+					if (settled) return;
+					settled = true;
+					if (error) reject(error); else resolve(output);
+				};
+				const child = spawn(
+					'ssh',
+					['-o', 'BatchMode=yes', '-o', `ConnectTimeout=${this.connectTimeoutSeconds}`, '--', host, command],
+					{stdio: ['pipe', 'pipe', 'pipe'], signal: controller.signal},
+				);
+				const stdout: Buffer[] = [];
+				const stderr: Buffer[] = [];
+				child.stdout.on('data', chunk => stdout.push(Buffer.from(chunk)));
+				child.stderr.on('data', chunk => stderr.push(Buffer.from(chunk)));
+				child.stdin.on('error', error => {
+					if ((error as NodeJS.ErrnoException).code !== 'EPIPE') finish(error);
+				});
+				child.on('error', error => finish(error));
+				child.on('close', code => {
+					if (code === 0) finish(undefined, Buffer.concat(stdout).toString('utf8'));
+					else finish(new Error(Buffer.concat(stderr).toString('utf8').trim() || `SSH 操作失败，退出码 ${code}`));
+				});
+				const source = createReadStream(path);
+				source.on('error', error => {
+					child.kill();
+					finish(error);
+				});
+				source.pipe(child.stdin);
+			});
+		} catch (error) {
+			if ((error as Error).name === 'AbortError') throw new Error(`上传 Claude Code 超时: ${host}`);
 			throw error;
 		} finally {
 			clearTimeout(timer);
@@ -177,6 +293,7 @@ export class SSHClient {
 	}
 
 	public async install(host: HostProfile): Promise<void> {
+		await this.ensureClaude(host);
 		const script = String.raw`set -eu
 umask 077
 mkdir -p "$HOME/.local/bin" "$HOME/.local/share/claude-proxy"
@@ -185,6 +302,36 @@ printf '%s' ${shellQuote(bridgeBase64)} | base64 -d > "$HOME/.local/share/claude
 chmod 755 "$HOME/.local/bin/claude-proxy" "$HOME/.local/share/claude-proxy/socks_http_bridge.py"
 `;
 		await this.runScript(host.sshHost, script, 60_000);
+	}
+
+	public async ensureClaude(host: HostProfile): Promise<{path: string; version: string; installed: boolean}> {
+		const probeOutput = await this.runScript(host.sshHost, claudeProbeScript, 30_000);
+		const probe = parseValues(probeOutput);
+		if (probe.get('claude_path')) {
+			return {path: probe.get('claude_path')!, version: '', installed: false};
+		}
+		if (probe.get('unsupported')) throw new Error(`Claude Code 不支持远端平台 ${probe.get('unsupported')}`);
+		const platform = probe.get('platform') as ClaudePlatform | undefined;
+		if (!platform) throw new Error('无法识别远端平台');
+		const downloaded = await downloadOfficialClaude(platform);
+		try {
+			const output = await this.runFile(
+				host.sshHost,
+				`sh -c ${shellQuote(installClaudeScript)}`,
+				downloaded.binaryPath,
+				10 * 60_000,
+			);
+			const installed = parseValues(output);
+			const path = installed.get('claude_path');
+			if (!path) throw new Error('远端安装完成，但没有返回 Claude 路径');
+			return {
+				path,
+				version: installed.get('claude_version') || downloaded.version,
+				installed: true,
+			};
+		} finally {
+			await downloaded.cleanup();
+		}
 	}
 
 	public async applyConfig(host: HostProfile, password: string): Promise<void> {
@@ -222,12 +369,7 @@ function decodeDiagnostic(encoded: string | undefined): string {
 }
 
 export function parseCheckOutput(output: string): RemoteStatus {
-	const values = new Map(
-		output.split('\n').filter(line => line.includes('=')).map(line => {
-			const index = line.indexOf('=');
-			return [line.slice(0, index), line.slice(index + 1)] as const;
-		}),
-	);
+	const values = parseValues(output);
 	return {
 		connected: values.get('connected') === 'yes',
 		launcher: values.get('launcher') === 'yes',
@@ -243,4 +385,13 @@ export function parseCheckOutput(output: string): RemoteStatus {
 	};
 }
 
-export const scriptsForTest = {applyScript, checkScript, toggleScript};
+function parseValues(output: string): Map<string, string> {
+	return new Map(
+		output.split('\n').filter(line => line.includes('=')).map(line => {
+			const index = line.indexOf('=');
+			return [line.slice(0, index), line.slice(index + 1)] as const;
+		}),
+	);
+}
+
+export const scriptsForTest = {applyScript, checkScript, claudeProbeScript, installClaudeScript, toggleScript};

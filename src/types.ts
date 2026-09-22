@@ -71,6 +71,7 @@ export function statusSummary(status: RemoteStatus): string {
 	const summary = [
 		`连接=${yn(status.connected)}`,
 		`启动器=${yn(status.launcher)}`,
+		`Claude=${status.realClaude || '未安装'}`,
 		`配置=${yn(status.config)}(${status.configMode})`,
 		`代理=${status.proxyHealth}`,
 		`默认替换=${yn(status.replaceClaude)}`,

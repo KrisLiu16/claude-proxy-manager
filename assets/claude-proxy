@@ -79,6 +79,16 @@ if [ ! -f "$BRIDGE_SCRIPT" ]; then
 fi
 
 CLAUDE_BIN="${CLAUDE_BIN:-$(config_value CLAUDE_BIN)}"
+if [ -z "$CLAUDE_BIN" ]; then
+    CLAUDE_BIN=$(command -v claude 2>/dev/null || true)
+    case "$CLAUDE_BIN" in */.local/share/claude-proxy/shim-bin/claude) CLAUDE_BIN="" ;; esac
+fi
+[ -n "$CLAUDE_BIN" ] || [ ! -x "$HOME/.local/bin/claude" ] || CLAUDE_BIN="$HOME/.local/bin/claude"
+if [ -z "$CLAUDE_BIN" ]; then
+    for candidate in /usr/local/bin/claude /usr/bin/claude; do
+        [ ! -x "$candidate" ] || { CLAUDE_BIN="$candidate"; break; }
+    done
+fi
 if [ -z "$CLAUDE_BIN" ] || [ ! -x "$CLAUDE_BIN" ]; then
     echo "claude-proxy: real Claude executable is missing: ${CLAUDE_BIN:-<not configured>}" >&2
     exit 4

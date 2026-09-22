@@ -217,9 +217,9 @@ export function App({initialHosts, store, secrets, ssh}: Props): React.JSX.Eleme
 				return `检查完成\n${statusSummary(result)}`;
 			});
 		} else if (input === 'i' && selected) {
-			void runOperation(`正在安装启动器到 ${selected.name}`, async () => {
+			void runOperation(`正在检查并安装 Claude/启动器到 ${selected.name}`, async () => {
 				await ssh.install(selected);
-				return '启动器安装完成';
+				return 'Claude 与代理启动器已就绪';
 			});
 		} else if (input === 's' && selected) {
 			const password = passwordFor(selected.name);
@@ -296,6 +296,6 @@ export function App({initialHosts, store, secrets, ssh}: Props): React.JSX.Eleme
 		<Box borderStyle="round" borderColor={statusColor} paddingX={1} marginTop={1}>
 			<Text color={statusColor}>{busy ? '… ' : ''}{status}</Text>
 		</Box>
-		<Box marginTop={1}><Text dimColor>↑/↓ 选择  a 添加  e 编辑  c 检查  i 安装  s 一键设置  t 切换默认替换  d 删除  q 退出</Text></Box>
+		<Box marginTop={1}><Text dimColor>↑/↓ 选择  a 添加  e 编辑  c 检查  i 安装 Claude/代理  s 一键设置  t 切换默认替换  d 删除  q 退出</Text></Box>
 	</Box>;
 }
