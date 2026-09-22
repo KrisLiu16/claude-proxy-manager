@@ -1,6 +1,6 @@
 {
   "name": "claude-proxy-manager",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "description": "Manage remote development machines and run Claude through an integrated proxy",
   "type": "module",
   "bin": {

@@ -1,4 +1,4 @@
-import React, {useMemo, useRef, useState} from 'react';
+import React, {useEffect, useMemo, useRef, useState} from 'react';
 import {Box, Text, useApp, useInput} from 'ink';
 import TextInput from 'ink-text-input';
 import type {ProfileStore} from './config.js';
@@ -6,6 +6,7 @@ import type {SecretStore} from './secrets.js';
 import type {HostProfile} from './types.js';
 import {DEFAULT_LOCALE, DEFAULT_TIMEZONE, normalizeNoProxy, parseProxySpec, statusSummary, validateHost} from './types.js';
 import type {SSHClient} from './ssh.js';
+import type {OperationProgress, ProgressReporter} from './ssh.js';
 
 type Props = {
 	initialHosts: HostProfile[];
@@ -63,6 +64,12 @@ function emptyForm(): FormState {
 	};
 }
 
+function progressBar(percent: number): string {
+	const width = 24;
+	const complete = Math.round(width * percent / 100);
+	return `[${'█'.repeat(complete)}${'░'.repeat(width - complete)}]`;
+}
+
 export function App({initialHosts, store, secrets, ssh}: Props): React.JSX.Element {
 	const {exit} = useApp();
 	const [hosts, setHosts] = useState(initialHosts);
@@ -72,6 +79,8 @@ export function App({initialHosts, store, secrets, ssh}: Props): React.JSX.Eleme
 	const [focus, setFocus] = useState(0);
 	const [originalName, setOriginalName] = useState('');
 	const [busy, setBusy] = useState(false);
+	const [progress, setProgress] = useState<OperationProgress>();
+	const [elapsedSeconds, setElapsedSeconds] = useState(0);
 	const [status, setStatus] = useState('选择机器后按 s 一键安装和应用配置');
 	const [statusColor, setStatusColor] = useState<'white' | 'green' | 'red'>('white');
 	const [pendingDelete, setPendingDelete] = useState('');
@@ -79,6 +88,13 @@ export function App({initialHosts, store, secrets, ssh}: Props): React.JSX.Eleme
 
 	const selected = hosts[cursor];
 	const orderedHosts = useMemo(() => hosts, [hosts]);
+
+	useEffect(() => {
+		if (!busy) { setElapsedSeconds(0); return; }
+		const startedAt = Date.now();
+		const timer = setInterval(() => setElapsedSeconds(Math.floor((Date.now() - startedAt) / 1_000)), 1_000);
+		return () => clearInterval(timer);
+	}, [busy]);
 
 	function passwordFor(name: string): string | undefined {
 		const inMemory = sessionPasswords.current.get(name);
@@ -179,18 +195,24 @@ export function App({initialHosts, store, secrets, ssh}: Props): React.JSX.Eleme
 		}
 	}
 
-	async function runOperation(label: string, operation: () => Promise<string>): Promise<void> {
+	async function runOperation(label: string, operation: (reporter: ProgressReporter) => Promise<string>): Promise<void> {
 		setBusy(true);
 		setStatus(label);
+		setProgress({percent: 0, label});
 		setStatusColor('white');
+		const reporter: ProgressReporter = update => {
+			setProgress(update);
+			setStatus(update.label);
+		};
 		try {
-			setStatus(await operation());
+			setStatus(await operation(reporter));
 			setStatusColor('green');
 		} catch (error) {
 			setStatus((error as Error).message);
 			setStatusColor('red');
 		} finally {
 			setBusy(false);
+			setProgress(undefined);
 		}
 	}
 
@@ -227,13 +249,13 @@ export function App({initialHosts, store, secrets, ssh}: Props): React.JSX.Eleme
 		else if (input === 'a') openEditor();
 		else if ((input === 'e' || key.return) && selected) openEditor(selected);
 		else if (input === 'c' && selected) {
-			void runOperation(`正在检查 ${selected.name}`, async () => {
-				const result = await ssh.check(selected);
+			void runOperation(`正在检查 ${selected.name}`, async reporter => {
+				const result = await ssh.check(selected, reporter);
 				return `检查完成\n${statusSummary(result)}`;
 			});
 		} else if (input === 'i' && selected) {
-			void runOperation(`正在检查并安装 Claude/cpm 到 ${selected.name}`, async () => {
-				await ssh.install(selected);
+			void runOperation(`正在检查并安装 Claude/cpm 到 ${selected.name}`, async reporter => {
+				await ssh.install(selected, reporter);
 				return 'Claude 与 cpm 运行时已就绪';
 			});
 		} else if (input === 's' && selected) {
@@ -243,14 +265,16 @@ export function App({initialHosts, store, secrets, ssh}: Props): React.JSX.Eleme
 				setStatusColor('red');
 				return;
 			}
-			void runOperation(`正在安装并配置 ${selected.name}`, async () => {
-				const result = await ssh.setup(selected, password);
+			void runOperation(`正在安装并配置 ${selected.name}`, async reporter => {
+				const result = await ssh.setup(selected, password, reporter);
 				return `远端配置完成\n${statusSummary(result)}`;
 			});
 		} else if (input === 't' && selected) {
 			const nextHost = {...selected, replaceClaude: !selected.replaceClaude};
-			void runOperation('正在切换默认 claude', async () => {
+			void runOperation('正在切换默认 claude', async reporter => {
+				reporter({percent: 20, label: '正在更新远端 shell 配置'});
 				await ssh.setReplaceClaude(nextHost, nextHost.replaceClaude);
+				reporter({percent: 75, label: '正在保存本机机器配置'});
 				const next = hosts.map(item => item.name === nextHost.name ? nextHost : item);
 				await store.save(next);
 				setHosts(next);
@@ -309,7 +333,9 @@ export function App({initialHosts, store, secrets, ssh}: Props): React.JSX.Eleme
 			</Text>)}
 		</Box>
 		<Box borderStyle="round" borderColor={statusColor} paddingX={1} marginTop={1}>
-			<Text color={statusColor}>{busy ? '… ' : ''}{status}</Text>
+			<Text color={statusColor}>{busy && progress
+				? `… ${progressBar(progress.percent)} ${String(progress.percent).padStart(3)}%  ${status}\n  已用 ${elapsedSeconds}s`
+				: status}</Text>
 		</Box>
 		<Box marginTop={1}><Text dimColor>↑/↓ 选择  a 添加  e 编辑  c 逐项检查  i 安装 Claude/cpm  s 一键设置  t 切换默认替换  d 删除  q 退出</Text></Box>
 	</Box>;

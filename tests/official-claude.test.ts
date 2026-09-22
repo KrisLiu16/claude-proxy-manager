@@ -47,11 +47,14 @@ test('official Claude downloader follows npm platform metadata and verifies sha5
 	await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
 	try {
 		const port = (server.address() as {port: number}).port;
-		const downloaded = await downloadOfficialClaude('linux-x64', `http://127.0.0.1:${port}`);
+		const progress: Array<{received: number; total: number}> = [];
+		const downloaded = await downloadOfficialClaude('linux-x64', `http://127.0.0.1:${port}`, (received, total) => progress.push({received, total}));
 		try {
 			assert.equal(downloaded.version, '9.9.9');
 			assert.equal(downloaded.packageName, '@anthropic-ai/claude-code-linux-x64');
 			assert.deepEqual(await readFile(downloaded.binaryPath), binary);
+			assert.equal(progress.at(-1)?.received, tarball.length);
+			assert.equal(progress.at(-1)?.total, tarball.length);
 		} finally {
 			await downloaded.cleanup();
 		}
@@ -59,4 +62,3 @@ test('official Claude downloader follows npm platform metadata and verifies sha5
 		server.close();
 	}
 });
-

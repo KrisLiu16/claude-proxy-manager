@@ -6,6 +6,7 @@ import {App} from './app.js';
 import {ProfileStore} from './config.js';
 import {SecretStore} from './secrets.js';
 import {SSHClient} from './ssh.js';
+import type {ProgressReporter} from './ssh.js';
 import type {HostProfile} from './types.js';
 import {statusSummary} from './types.js';
 import {inspectProxyRuntime, readRuntimeConfig, runBridge, runClaudeProxy, stopBridge} from './proxy-runtime.js';
@@ -65,6 +66,16 @@ program
 	.version(VERSION)
 	.option('--config <path>', '本地配置文件路径');
 
+function cliProgressReporter(): ProgressReporter {
+	return update => {
+		const width = 20;
+		const complete = Math.round(width * update.percent / 100);
+		const line = `[${'='.repeat(complete)}${' '.repeat(width - complete)}] ${String(update.percent).padStart(3)}% ${update.label}`;
+		if (process.stderr.isTTY) process.stderr.write(`\r\x1b[2K${line}${update.percent === 100 ? '\n' : ''}`);
+		else process.stderr.write(`${line}\n`);
+	};
+}
+
 async function context(): Promise<{
 	store: ProfileStore;
 	secrets: SecretStore;
@@ -96,14 +107,14 @@ program.command('list').description('列出机器配置').action(async () => {
 
 program.command('check <name>').description('检查远端状态和代理连通性').action(async name => {
 	const {hosts, ssh} = await context();
-	console.log(statusSummary(await ssh.check(findHost(hosts, String(name)))));
+	console.log(statusSummary(await ssh.check(findHost(hosts, String(name)), cliProgressReporter())));
 });
 
 program.command('proxy [args...]').description('使用当前机器配置的代理运行 Claude Code');
 
 program.command('install <name>').description('检查并安装官方 Claude 与 cpm 运行时').action(async name => {
 	const {hosts, ssh} = await context();
-	await ssh.install(findHost(hosts, String(name)));
+	await ssh.install(findHost(hosts, String(name)), cliProgressReporter());
 	console.log('Claude 与 cpm 运行时已就绪');
 });
 
@@ -112,7 +123,7 @@ program.command('setup <name>').description('安装、配置并应用默认替�
 	const host = findHost(hosts, String(name));
 	const password = secrets.get(host.name);
 	if (!password) throw new Error('本机机密配置中没有代理密码，请先在 TUI 中编辑该机器');
-	console.log(statusSummary(await ssh.setup(host, password)));
+	console.log(statusSummary(await ssh.setup(host, password, cliProgressReporter())));
 });
 
 for (const [command, enabled] of [['enable', true], ['disable', false]] as const) {

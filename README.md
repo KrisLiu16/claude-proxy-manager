@@ -8,6 +8,7 @@
 - 内置 HTTP → SOCKS5 bridge
 - 使用完整代理环境运行 Claude Code
 - 逐项检查文件、网络、环境变量、时区和出口 IP
+- 安装和设置时显示阶段、百分比、传输 MiB 与已用时间
 
 远端没有单独的代理启动器或 Python bridge。运行代理版 Claude 的命令是：
 
@@ -26,7 +27,7 @@ curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main
 安装指定版本：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main/install.sh | CPM_VERSION=v0.3.2 sh
+curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main/install.sh | CPM_VERSION=v0.4.0 sh
 ```
 
 安装器支持 Linux/macOS 的 x64 和 arm64，验证 Release 资产的 SHA-256，默认写入 `~/.local/bin/cpm`。可用以下变量调整：
@@ -34,7 +35,7 @@ curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main
 ```text
 CPM_INSTALL_DIR=/custom/bin
 CPM_NO_MODIFY_PATH=1
-CPM_VERSION=v0.3.2
+CPM_VERSION=v0.4.0
 ```
 
 ## 工作方式
@@ -79,6 +80,8 @@ t    切换 claude → cpm proxy
 d    删除本地机器配置
 q    退出
 ```
+
+安装过程会实时显示当前阶段。下载 Claude/cpm 和 SSH 上传时同时显示已传输 MiB，远端检查阶段持续显示已用时间。
 
 每台机器可以独立配置：
 

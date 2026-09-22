@@ -24,6 +24,7 @@ export type DownloadedClaude = {
 	binaryPath: string;
 	cleanup: () => Promise<void>;
 };
+export type ByteProgress = (received: number, total: number) => void;
 
 const mainPackage = '@anthropic-ai/claude-code';
 
@@ -60,9 +61,11 @@ function sha512Integrity(value: string): string {
 	return found.slice('sha512-'.length);
 }
 
-async function downloadAndVerify(url: string, destination: string, expected: string): Promise<void> {
+async function downloadAndVerify(url: string, destination: string, expected: string, progress?: ByteProgress): Promise<void> {
 	const response = await fetch(url, {signal: AbortSignal.timeout(10 * 60_000)});
 	if (!response.ok || !response.body) throw new Error(`下载 Claude Code 失败: HTTP ${response.status}`);
+	const total = Number(response.headers.get('content-length') || 0);
+	let received = 0;
 	const file = await open(destination, 'w', 0o600);
 	const hash = createHash('sha512');
 	try {
@@ -70,6 +73,8 @@ async function downloadAndVerify(url: string, destination: string, expected: str
 		while (true) {
 			const {done, value} = await reader.read();
 			if (done) break;
+			received += value.length;
+			progress?.(received, total);
 			hash.update(value);
 			let offset = 0;
 			while (offset < value.length) {
@@ -100,6 +105,7 @@ async function run(command: string, args: string[]): Promise<void> {
 export async function downloadOfficialClaude(
 	platform: ClaudePlatform,
 	registry = 'https://registry.npmjs.org',
+	progress?: ByteProgress,
 ): Promise<DownloadedClaude> {
 	const work = await mkdtemp(join(tmpdir(), 'cpm-claude-'));
 	try {
@@ -114,7 +120,7 @@ export async function downloadOfficialClaude(
 		const integrity = platformDocument.dist?.integrity;
 		if (!tarball || !integrity) throw new Error(`${selected.packageName}@${selected.version} 缺少 tarball 或 integrity`);
 		const archive = join(work, 'package.tgz');
-		await downloadAndVerify(tarball, archive, sha512Integrity(integrity));
+		await downloadAndVerify(tarball, archive, sha512Integrity(integrity), progress);
 		const tree = join(work, 'tree');
 		await mkdir(tree);
 		await run('tar', ['-xzf', archive, '-C', tree, '--strip-components=1', 'package/claude']);

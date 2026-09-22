@@ -5,7 +5,7 @@ import {tmpdir} from 'node:os';
 import {basename, join} from 'node:path';
 import {Readable} from 'node:stream';
 import {pipeline} from 'node:stream/promises';
-import type {ClaudePlatform} from './official-claude.js';
+import type {ByteProgress, ClaudePlatform} from './official-claude.js';
 import {RELEASE_REPOSITORY, VERSION} from './version.js';
 
 export type RuntimeDownload = {binaryPath: string; cleanup: () => Promise<void>};
@@ -31,13 +31,20 @@ async function sha256(path: string): Promise<string> {
 	return createHash('sha256').update(await readFile(path)).digest('hex');
 }
 
-async function fetchFile(url: string, path: string): Promise<void> {
+async function fetchFile(url: string, path: string, progress?: ByteProgress): Promise<void> {
 	const response = await fetch(url, {redirect: 'follow'});
 	if (!response.ok || !response.body) throw new Error(`下载 cpm 运行时失败：HTTP ${response.status}`);
-	await pipeline(Readable.fromWeb(response.body as never), createWriteStream(path, {mode: 0o755}));
+	const total = Number(response.headers.get('content-length') || 0);
+	let received = 0;
+	const source = Readable.fromWeb(response.body as never);
+	source.on('data', chunk => {
+		received += Buffer.byteLength(chunk);
+		progress?.(received, total);
+	});
+	await pipeline(source, createWriteStream(path, {mode: 0o755}));
 }
 
-export async function runtimeForRemote(platform: ClaudePlatform): Promise<RuntimeDownload> {
+export async function runtimeForRemote(platform: ClaudePlatform, progress?: ByteProgress): Promise<RuntimeDownload> {
 	const asset = runtimeAsset(platform);
 	const requested = asset.slice(4);
 	const override = process.env.CPM_SELF_BINARY;
@@ -54,7 +61,7 @@ export async function runtimeForRemote(platform: ClaudePlatform): Promise<Runtim
 		const checksums = await checksumsResponse.text();
 		const expected = checksums.split(/\r?\n/).map(line => line.trim().split(/\s+/)).find(parts => parts.at(-1) === asset)?.[0];
 		if (!expected) throw new Error(`发布校验文件中没有 ${asset}`);
-		await fetchFile(`${base}/${asset}`, binaryPath);
+		await fetchFile(`${base}/${asset}`, binaryPath, progress);
 		const actual = await sha256(binaryPath);
 		if (actual.toLowerCase() !== expected.toLowerCase()) throw new Error(`cpm 运行时 SHA-256 校验失败：${asset}`);
 		await chmod(binaryPath, 0o755);
