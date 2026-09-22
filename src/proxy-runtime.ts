@@ -225,7 +225,12 @@ type AutomaticResolution = {
 	exitIp?: string;
 };
 
-async function resolveAutomaticEnvironment(config: RuntimeConfig, force: boolean, knownExitIp?: string): Promise<AutomaticResolution> {
+export async function resolveAutomaticEnvironment(
+	config: RuntimeConfig,
+	force: boolean,
+	knownExitIp?: string,
+	lookup: typeof lookupGeoProfile = lookupGeoProfile,
+): Promise<AutomaticResolution> {
 	const autoTimezone = config.timezone.toLowerCase() === 'auto';
 	const autoLocale = config.locale.toLowerCase() === 'auto';
 	if (!force && !autoTimezone && !autoLocale) return {config, cached: false};
@@ -240,7 +245,7 @@ async function resolveAutomaticEnvironment(config: RuntimeConfig, force: boolean
 				if (result.status !== 200 || !result.body) throw new Error(`出口 IP 查询返回 HTTP ${result.status}`);
 				exitIp = result.body;
 			}
-			geo = await lookupGeoProfile(exitIp, async (host, path) => {
+			geo = await lookup(exitIp, async (host, path) => {
 				const result = await bridgedHttps(config.httpPort, host, path);
 				if (result.status !== 200) throw new Error(`HTTP ${result.status}`);
 				try { return JSON.parse(result.body) as unknown; }
@@ -255,9 +260,20 @@ async function resolveAutomaticEnvironment(config: RuntimeConfig, force: boolean
 			exitIp: exitIp || geo.ip,
 		};
 	} catch (error) {
+		const message = (error as Error).message;
+		const stale = await loadCachedGeo(fingerprint, Number.POSITIVE_INFINITY);
+		if (stale) {
+			return {
+				config: {...config, timezone: autoTimezone ? stale.timezone : config.timezone, locale: autoLocale ? stale.locale : config.locale},
+				geo: stale,
+				error: message,
+				cached: true,
+				...(knownExitIp ? {exitIp: knownExitIp} : {exitIp: stale.ip}),
+			};
+		}
 		return {
 			config: {...config, timezone: autoTimezone ? FALLBACK_TIMEZONE : config.timezone, locale: autoLocale ? FALLBACK_LOCALE : config.locale},
-			error: (error as Error).message,
+			error: message,
 			cached: false,
 			...(knownExitIp ? {exitIp: knownExitIp} : {}),
 		};
@@ -497,7 +513,10 @@ export async function inspectProxyRuntime(): Promise<CheckItem[]> {
 	rows.push(row('CLAUDE_CONFIG_DIR', config.claudeConfigDir && env.CLAUDE_CONFIG_DIR === config.claudeConfigDir ? 'PASS' : 'INFO', config.claudeConfigDir || '<Claude 默认目录>'));
 	if (resolution.geo) {
 		const geo = resolution.geo;
-		rows.push(row('地理信息 API', 'PASS', geo.source, resolution.cached ? '缓存' : '实时'));
+		const geoDetail = resolution.error
+			? `实时失败，复用旧缓存：${resolution.error}`
+			: resolution.cached ? '缓存' : '实时';
+		rows.push(row('地理信息 API', resolution.error ? 'WARN' : 'PASS', geo.source, geoDetail));
 		rows.push(row('IP 归属国家', geo.country ? 'PASS' : 'WARN', [geo.country, geo.countryCode].filter(Boolean).join(' / ') || '<未知>'));
 		rows.push(row('州/地区', geo.region ? 'PASS' : 'WARN', geo.region || '<未知>'));
 		rows.push(row('城市', geo.city ? 'PASS' : 'WARN', geo.city || '<未知>'));
@@ -547,7 +566,9 @@ export async function runClaudeProxy(args: string[]): Promise<number> {
 	await ensureBridge(config);
 	const resolution = await resolveAutomaticEnvironment(config, false);
 	if (resolution.error && (config.timezone === 'auto' || config.locale === 'auto')) {
-		console.error(`cpm: IP 地理信息探测失败，使用默认时区/语言：${resolution.error}`);
+		console.error(resolution.geo
+			? `cpm: IP 地理信息实时探测失败，复用上次缓存：${resolution.error}`
+			: `cpm: IP 地理信息探测失败且没有缓存，使用默认时区/语言：${resolution.error}`);
 	}
 	return await new Promise((resolve, reject) => {
 		const child = spawn(config.claudeBin, ['--no-chrome', ...args], {stdio: 'inherit', env: proxyEnvironment(resolution.config)});

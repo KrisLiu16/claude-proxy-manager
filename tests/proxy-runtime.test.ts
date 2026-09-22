@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
+import {createHash} from 'node:crypto';
 import {mkdir, mkdtemp, writeFile} from 'node:fs/promises';
 import net from 'node:net';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import test from 'node:test';
-import {proxyEnvironment, readRuntimeConfig, socksConnect} from '../src/proxy-runtime.js';
+import {proxyEnvironment, readRuntimeConfig, resolveAutomaticEnvironment, socksConnect, type RuntimeConfig} from '../src/proxy-runtime.js';
+import {saveCachedGeo, type GeoProfile} from '../src/geolocation.js';
 
 test('integrated SOCKS5 client authenticates and requests remote DNS target', async () => {
 	let requested = '';
@@ -80,5 +82,33 @@ test('runtime config reproduces every Claude proxy environment variable on port 
 			const value = previous.get(key);
 			if (value === undefined) delete process.env[key]; else process.env[key] = value;
 		}
+	}
+});
+
+test('automatic environment reuses stale cache when every geolocation API fails', async () => {
+	const folder = await mkdtemp(join(tmpdir(), 'cpm-stale-geo-'));
+	const previous = process.env.CPM_GEO_CACHE;
+	process.env.CPM_GEO_CACHE = join(folder, 'geo.json');
+	const config: RuntimeConfig = {
+		proxyUrl: 'socks5h://alice:secret@proxy.example:8022',
+		noProxy: '',
+		claudeBin: '/opt/claude',
+		timezone: 'auto',
+		locale: 'auto',
+		claudeConfigDir: '',
+		httpPort: 17_891,
+	};
+	const fingerprint = createHash('sha256').update(`${config.proxyUrl}\0${config.httpPort}`).digest('hex');
+	const stale: GeoProfile = {ip: '203.0.113.9', country: 'United States', countryCode: 'US', region: 'Ohio', city: 'Columbus', isp: 'Example ISP', asn: 'AS64500', timezone: 'America/New_York', languages: 'en-US', locale: 'en_US.UTF-8', source: 'ipapi.co', detectedAt: '2000-01-01T00:00:00.000Z'};
+	try {
+		await saveCachedGeo(fingerprint, stale);
+		const result = await resolveAutomaticEnvironment(config, true, stale.ip, async () => { throw new Error('all providers unavailable'); });
+		assert.equal(result.cached, true);
+		assert.equal(result.geo?.city, 'Columbus');
+		assert.equal(result.config.timezone, 'America/New_York');
+		assert.equal(result.config.locale, 'en_US.UTF-8');
+		assert.match(result.error || '', /all providers unavailable/);
+	} finally {
+		if (previous === undefined) delete process.env.CPM_GEO_CACHE; else process.env.CPM_GEO_CACHE = previous;
 	}
 });

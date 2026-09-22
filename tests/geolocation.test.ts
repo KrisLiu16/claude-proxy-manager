@@ -40,6 +40,10 @@ test('geolocation cache is private and scoped to the proxy fingerprint', async (
 		assert.equal((await stat(path)).mode & 0o777, 0o600);
 		assert.equal((await loadCachedGeo('fingerprint-a', 60_000))?.city, 'Columbus');
 		assert.equal(await loadCachedGeo('fingerprint-b', 60_000), undefined);
+		const stale = {...profile, detectedAt: '2000-01-01T00:00:00.000Z'};
+		await saveCachedGeo('fingerprint-a', stale);
+		assert.equal(await loadCachedGeo('fingerprint-a', 60_000), undefined);
+		assert.equal((await loadCachedGeo('fingerprint-a', Number.POSITIVE_INFINITY))?.city, 'Columbus');
 	} finally {
 		if (previous === undefined) delete process.env.CPM_GEO_CACHE; else process.env.CPM_GEO_CACHE = previous;
 	}

@@ -26,7 +26,7 @@ curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main
 安装指定版本：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main/install.sh | CPM_VERSION=v0.3.1 sh
+curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main/install.sh | CPM_VERSION=v0.3.2 sh
 ```
 
 安装器支持 Linux/macOS 的 x64 和 arm64，验证 Release 资产的 SHA-256，默认写入 `~/.local/bin/cpm`。可用以下变量调整：
@@ -34,7 +34,7 @@ curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main
 ```text
 CPM_INSTALL_DIR=/custom/bin
 CPM_NO_MODIFY_PATH=1
-CPM_VERSION=v0.3.1
+CPM_VERSION=v0.3.2
 ```
 
 ## 工作方式
@@ -159,7 +159,7 @@ LC_MESSAGES=<同 LANG>
 CLAUDE_CONFIG_DIR=<可选的 Claude 状态目录>
 ```
 
-自动探测以 `ipapi.co` 为主，`ipwho.is` 为备用，结果按代理配置缓存 6 小时。时区与 locale 可以按机器显式填写，手动值优先。探测服务不可用时回退到 `America/Los_Angeles` 和 `en_US.UTF-8`，不会阻止 Claude 启动。IP 地理位置来自数据库估算，城市和 ISP 可能在不同供应商之间有差异。
+自动探测以 `ipapi.co` 为主，`ipwho.is` 为备用，结果按代理配置缓存 6 小时。时区与 locale 可以按机器显式填写，手动值优先。实时 API 失败时，即使缓存已经超过 6 小时，也会继续使用最后一次成功结果；只有从未生成过缓存时才回退到 `America/Los_Angeles` 和 `en_US.UTF-8`。IP 地理位置来自数据库估算，城市和 ISP 可能在不同供应商之间有差异。
 
 bridge 只监听 `127.0.0.1`，SOCKS5 凭据从权限为 `0600` 的配置文件读取，不进入进程参数。
 
