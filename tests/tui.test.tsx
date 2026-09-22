@@ -25,7 +25,7 @@ test('TUI host list renders without a terminal', () => {
 		secrets={new SecretStore()}
 		ssh={new SSHClient()}
 	/>);
-	assert.match(output, /Claude Proxy Manager/);
+	assert.match(output, /^CPM/m);
 	assert.match(output, /dev/);
 	assert.match(output, /claude→proxy=on/);
 });
