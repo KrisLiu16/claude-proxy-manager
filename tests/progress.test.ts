@@ -58,7 +58,7 @@ esac
 	}]}));
 	const result = spawnSync(process.execPath, ['--import', 'tsx', 'src/cli.tsx', '--config', config, 'setup', 'dev'], {
 		cwd: process.cwd(),
-		env: {...process.env, HOME: home, PATH: `${bin}:${process.env.PATH}`, CPM_REMOTE_HOME: remoteHome, CPM_SSH_LOG: log},
+		env: {...process.env, HOME: home, XDG_CONFIG_HOME: join(home, '.config'), PATH: `${bin}:${process.env.PATH}`, CPM_REMOTE_HOME: remoteHome, CPM_SSH_LOG: log},
 		encoding: 'utf8',
 	});
 	assert.equal(result.status, 0, result.stderr);
