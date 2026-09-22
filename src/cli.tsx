@@ -9,7 +9,7 @@ import {SSHClient} from './ssh.js';
 import type {ProgressReporter} from './ssh.js';
 import type {HostProfile} from './types.js';
 import {statusSummary} from './types.js';
-import {inspectProxyRuntime, readRuntimeConfig, runBridge, runClaudeProxy, stopBridge} from './proxy-runtime.js';
+import {inspectProxyRuntime, readRuntimeConfig, resolvedRuntimeEnvironment, runBridge, runClaudeProxy, stopBridge} from './proxy-runtime.js';
 import {applyRemoteConfig, remoteStatus, toggleRemote} from './remote.js';
 import {VERSION} from './version.js';
 
@@ -41,6 +41,10 @@ async function handleRuntimeMode(): Promise<boolean> {
 	}
 	if (command === '__remote-toggle') {
 		await toggleRemote(process.argv[3] === 'on');
+		return true;
+	}
+	if (command === '__remote-environment') {
+		process.stdout.write(`${JSON.stringify(await resolvedRuntimeEnvironment())}\n`);
 		return true;
 	}
 	if (command === '__local-check') {
@@ -111,12 +115,6 @@ program.command('check <name>').description('检查远端状态和代理连通�
 });
 
 program.command('proxy [args...]').description('使用当前机器配置的代理运行 Claude Code');
-
-program.command('install <name>').description('检查并安装官方 Claude 与 cpm 运行时').action(async name => {
-	const {hosts, ssh} = await context();
-	await ssh.install(findHost(hosts, String(name)), cliProgressReporter());
-	console.log('Claude 与 cpm 运行时已就绪');
-});
 
 program.command('setup <name>').description('安装、配置并应用默认替换开关').action(async name => {
 	const {hosts, ssh, secrets} = await context();

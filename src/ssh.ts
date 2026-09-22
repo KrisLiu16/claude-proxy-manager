@@ -1,13 +1,20 @@
-import {spawn} from 'node:child_process';
+import {spawn, type ChildProcessWithoutNullStreams} from 'node:child_process';
 import {createReadStream} from 'node:fs';
 import {stat} from 'node:fs/promises';
 import type {HostProfile, RemoteStatus} from './types.js';
 import {validateHost} from './types.js';
 import {downloadOfficialClaude, type ClaudePlatform} from './official-claude.js';
 import {runtimeForRemote} from './runtime-distribution.js';
+import {openSecureClaudeLogin, type SecureLoginBrowser} from './browser-login.js';
 
 export type OperationProgress = {percent: number; label: string};
 export type ProgressReporter = (progress: OperationProgress) => void;
+
+export type RemoteLoginSession = {
+	authorizationUrl: string;
+	submit: (authorizationCode: string, reporter?: ProgressReporter) => Promise<void>;
+	cancel: () => Promise<void>;
+};
 
 function report(reporter: ProgressReporter | undefined, percent: number, label: string): void {
 	reporter?.({percent: Math.max(0, Math.min(100, Math.round(percent))), label});
@@ -96,6 +103,37 @@ function parseValues(output: string): Map<string, string> {
 		const index = line.indexOf('=');
 		return [line.slice(0, index), line.slice(index + 1)] as const;
 	}));
+}
+
+function proxyUrl(host: HostProfile, password: string): string {
+	const username = encodeURIComponent(host.proxyUser);
+	const encodedPassword = encodeURIComponent(password);
+	const address = host.proxyHost.includes(':') ? `[${host.proxyHost}]` : host.proxyHost;
+	return `socks5h://${username}:${encodedPassword}@${address}:${host.proxyPort}`;
+}
+
+function stripTerminalCodes(value: string): string {
+	return value
+		.replaceAll(/\x1B\][^\x07]*(?:\x07|\x1B\\)/g, '')
+		.replaceAll(/\x1B\[[0-?]*[ -/]*[@-~]/g, '')
+		.replaceAll('\r', '');
+}
+
+function findAuthorizationUrl(value: string): string | undefined {
+	for (const found of stripTerminalCodes(value).matchAll(/https:\/\/[^\s<>"']+/g)) {
+		try {
+			const parsed = new URL(found[0]);
+			if (parsed.searchParams.has('state') && parsed.searchParams.has('code_challenge')) return parsed.toString();
+		} catch {}
+	}
+	return undefined;
+}
+
+function waitForChild(child: ChildProcessWithoutNullStreams): Promise<number> {
+	return new Promise((resolve, reject) => {
+		child.once('error', reject);
+		child.once('close', code => resolve(code ?? 1));
+	});
 }
 
 export class SSHClient {
@@ -201,10 +239,6 @@ export class SSHClient {
 		finally { await runtime.cleanup(); }
 	}
 
-	public async install(host: HostProfile, reporter?: ProgressReporter): Promise<void> {
-		await this.installSteps(host, reporter);
-	}
-
 	public async ensureClaude(host: HostProfile, reporter?: ProgressReporter): Promise<{path: string; version: string; installed: boolean}> {
 		report(reporter, 5, '正在检查开发机上的 Claude Code');
 		const probe = await this.probe(host);
@@ -231,11 +265,8 @@ export class SSHClient {
 	public async applyConfig(host: HostProfile, password: string): Promise<void> {
 		validateHost(host, true);
 		if (!password || /[\r\n]/.test(password)) throw new Error('代理密码不能为空且不能包含换行');
-		const username = encodeURIComponent(host.proxyUser);
-		const encodedPassword = encodeURIComponent(password);
-		const address = host.proxyHost.includes(':') ? `[${host.proxyHost}]` : host.proxyHost;
 		const content = [
-			`SOCKS5_PROXY=socks5h://${username}:${encodedPassword}@${address}:${host.proxyPort}`,
+			`SOCKS5_PROXY=${proxyUrl(host, password)}`,
 			`NO_PROXY=${host.noProxy.join(',')}`,
 			'TZ=' + host.timezone,
 			'LANG=' + host.locale,
@@ -260,6 +291,113 @@ export class SSHClient {
 		const status = await this.check(host, scoped(reporter, 90, 100));
 		report(reporter, 100, '安装、配置和验证全部完成');
 		return status;
+	}
+
+	public async beginLogin(host: HostProfile, password: string, reporter?: ProgressReporter): Promise<RemoteLoginSession> {
+		if (process.platform !== 'darwin') throw new Error('远端 Claude 安全登录目前只支持从 macOS 发起');
+		validateHost(host, true);
+		if (!password || /[\r\n]/.test(password)) throw new Error('代理密码不能为空且不能包含换行');
+		report(reporter, 8, `正在通过 SSH 连接 ${host.name}`);
+		let environment: {timezone: string; locale: string};
+		try {
+			environment = JSON.parse(await this.run(
+				host.sshHost,
+				'if [ -x "$HOME/.local/bin/cpm" ]; then exec "$HOME/.local/bin/cpm" __remote-environment; else echo CPM_NOT_INSTALLED; exit 7; fi',
+				'',
+				90_000,
+			)) as typeof environment;
+		} catch (error) {
+			throw new Error(`无法读取远端代理环境，请先按 s 完成设置：${(error as Error).message}`);
+		}
+		if (!environment.timezone || !environment.locale) {
+			throw new Error('远端 cpm 返回了无效的时区或语言配置');
+		}
+		report(reporter, 24, `登录环境：${environment.timezone} / ${environment.locale}`);
+
+		const controller = new AbortController();
+		const child = spawn('ssh', [
+			'-tt',
+			'-o', 'BatchMode=yes',
+			'-o', `ConnectTimeout=${this.connectTimeoutSeconds}`,
+			'--', host.sshHost,
+			'stty cols 4096 2>/dev/null || true; exec "$HOME/.local/bin/cpm" proxy auth login --claudeai',
+		], {stdio: ['pipe', 'pipe', 'pipe'], signal: controller.signal}) as ChildProcessWithoutNullStreams;
+		let output = '';
+		let browser: SecureLoginBrowser | undefined;
+		let finished = false;
+		const exited = waitForChild(child).catch(error => {
+			output = (output + `\n${(error as Error).message}`).slice(-131_072);
+			return 1;
+		}).finally(() => { finished = true; });
+		child.stdout.on('data', chunk => { output = (output + Buffer.from(chunk).toString('utf8')).slice(-131_072); });
+		child.stderr.on('data', chunk => { output = (output + Buffer.from(chunk).toString('utf8')).slice(-131_072); });
+		report(reporter, 36, '正在等待远端 Claude 生成官方登录链接');
+
+		let authorizationUrl = '';
+		const startedAt = Date.now();
+		while (!authorizationUrl && !finished && Date.now() - startedAt < 60_000) {
+			authorizationUrl = findAuthorizationUrl(output) || '';
+			if (!authorizationUrl) await new Promise(resolve => setTimeout(resolve, 100));
+		}
+		authorizationUrl ||= findAuthorizationUrl(output) || '';
+		if (!authorizationUrl) {
+			controller.abort();
+			await exited.catch(() => 1);
+			throw new Error(finished ? '远端 Claude 未返回登录链接' : '等待远端 Claude 登录链接超时');
+		}
+
+		try {
+			report(reporter, 55, '正在启动隔离的 Google Chrome 与内存代理');
+			browser = await openSecureClaudeLogin({
+				authorizationUrl,
+				proxyUrl: proxyUrl(host, password),
+				timezone: environment.timezone,
+				locale: environment.locale,
+			});
+			report(reporter, 100, '登录页已打开，请在浏览器登录后手动回填授权码');
+		} catch (error) {
+			controller.abort();
+			await exited.catch(() => 1);
+			throw error;
+		}
+
+		let settled = false;
+		const cleanup = async (): Promise<void> => {
+			await browser?.close();
+			browser = undefined;
+		};
+		return {
+			authorizationUrl,
+			submit: async (authorizationCode, submitReporter) => {
+				if (settled) throw new Error('该登录会话已经结束');
+				const code = authorizationCode.trim();
+				if (!code || code.length > 8_192 || /[\r\n\0]/.test(code)) throw new Error('授权码为空或格式无效');
+				settled = true;
+				report(submitReporter, 15, '正在通过 SSH 标准输入提交授权码');
+				child.stdin.end(`${code}\r`);
+				const timeout = setTimeout(() => controller.abort(), 120_000);
+				try {
+					const exitCode = await exited;
+					if (exitCode !== 0) throw new Error(`远端 Claude 登录失败，退出码 ${exitCode}`);
+					report(submitReporter, 75, '正在验证远端 Claude 登录状态');
+					const raw = stripTerminalCodes(await this.run(host.sshHost, 'exec "$HOME/.local/bin/cpm" proxy auth status', '', 60_000));
+					if (!/"loggedIn"\s*:\s*true/.test(raw)) throw new Error('授权流程已结束，但远端 Claude 没有报告已登录');
+					report(submitReporter, 100, '远端 Claude 登录成功');
+				} finally {
+					clearTimeout(timeout);
+					await cleanup();
+				}
+			},
+			cancel: async () => {
+				if (!settled) {
+					settled = true;
+					try { child.stdin.end('\x03'); } catch {}
+				}
+				controller.abort();
+				await exited.catch(() => 1);
+				await cleanup();
+			},
+		};
 	}
 }
 

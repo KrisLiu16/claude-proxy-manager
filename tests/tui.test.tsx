@@ -28,4 +28,16 @@ test('TUI host list renders without a terminal', () => {
 	assert.match(output, /^CPM/m);
 	assert.match(output, /dev/);
 	assert.match(output, /claude→proxy=on/);
+	assert.doesNotMatch(output, /i 安装 Claude/);
+});
+
+test('TUI shows remote Claude login on macOS', () => {
+	const output = renderToString(<App
+		initialHosts={[]}
+		store={new ProfileStore('/tmp/not-used-cpm-test.json')}
+		secrets={new SecretStore()}
+		ssh={new SSHClient()}
+		platform="darwin"
+	/>);
+	assert.match(output, /l 登录远端 Claude/);
 });

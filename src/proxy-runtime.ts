@@ -2,7 +2,7 @@ import {spawn} from 'node:child_process';
 import {createHash, randomBytes} from 'node:crypto';
 import {constants as fsConstants} from 'node:fs';
 import {access, chmod, mkdir, readFile, realpath, rm, writeFile} from 'node:fs/promises';
-import net, {type Socket} from 'node:net';
+import net, {type AddressInfo, type Socket} from 'node:net';
 import {homedir} from 'node:os';
 import {basename, dirname, join} from 'node:path';
 import tls from 'node:tls';
@@ -313,6 +313,7 @@ async function readHttpHead(client: Socket): Promise<{head: Buffer; rest: Buffer
 
 async function handleProxyClient(client: Socket, proxyUrl: string, healthToken: string): Promise<void> {
 	let upstream: Socket | undefined;
+	client.once('close', () => upstream?.destroy());
 	try {
 		const {head, rest} = await readHttpHead(client);
 		const lines = head.toString('latin1').split('\r\n');
@@ -342,6 +343,40 @@ async function handleProxyClient(client: Socket, proxyUrl: string, healthToken: 
 		if (!client.destroyed) client.end('HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n');
 		upstream?.destroy();
 	}
+}
+
+export type EphemeralBridge = {
+	port: number;
+	close: () => Promise<void>;
+};
+
+/**
+ * Starts a loopback-only HTTP to SOCKS5 bridge without writing the proxy URL
+ * or its credentials to disk. This is used by the short-lived login browser.
+ */
+export async function startEphemeralBridge(proxyUrl: string): Promise<EphemeralBridge> {
+	parseProxy(proxyUrl);
+	const sockets = new Set<Socket>();
+	const server = net.createServer(client => {
+		sockets.add(client);
+		client.once('close', () => sockets.delete(client));
+		void handleProxyClient(client, proxyUrl, 'browser-login-no-health-endpoint');
+	});
+	await new Promise<void>((resolve, reject) => {
+		server.once('error', reject);
+		server.listen(0, '127.0.0.1', resolve);
+	});
+	const address = server.address() as AddressInfo;
+	let closed = false;
+	return {
+		port: address.port,
+		close: async () => {
+			if (closed) return;
+			closed = true;
+			for (const socket of sockets) socket.destroy();
+			await new Promise<void>(resolve => server.close(() => resolve()));
+		},
+	};
 }
 
 export async function runBridge(configFile: string, port: number, healthToken: string): Promise<never> {
@@ -443,6 +478,17 @@ export function proxyEnvironment(config: RuntimeConfig): NodeJS.ProcessEnv {
 	};
 	if (config.claudeConfigDir) environment.CLAUDE_CONFIG_DIR = config.claudeConfigDir;
 	return environment;
+}
+
+export async function resolvedRuntimeEnvironment(): Promise<{timezone: string; locale: string}> {
+	const config = await readRuntimeConfig();
+	parseProxy(config.proxyUrl);
+	await ensureBridge(config);
+	const resolution = await resolveAutomaticEnvironment(config, false);
+	return {
+		timezone: resolution.config.timezone,
+		locale: resolution.config.locale,
+	};
 }
 
 function row(name: string, state: CheckState, value: string, detail = ''): CheckItem {

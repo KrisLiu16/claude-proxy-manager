@@ -27,7 +27,7 @@ curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main
 安装指定版本：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main/install.sh | CPM_VERSION=v0.4.0 sh
+curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main/install.sh | CPM_VERSION=v0.5.0 sh
 ```
 
 安装器支持 Linux/macOS 的 x64 和 arm64，验证 Release 资产的 SHA-256，默认写入 `~/.local/bin/cpm`。可用以下变量调整：
@@ -35,7 +35,7 @@ curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main
 ```text
 CPM_INSTALL_DIR=/custom/bin
 CPM_NO_MODIFY_PATH=1
-CPM_VERSION=v0.4.0
+CPM_VERSION=v0.5.0
 ```
 
 ## 工作方式
@@ -74,14 +74,27 @@ cpm
 a    添加机器
 e    编辑机器
 c    逐项检查
-i    安装官方 Claude 和 cpm
 s    安装、配置、切换默认替换并检查
+l    在 macOS 上登录远端 Claude
 t    切换 claude → cpm proxy
 d    删除本地机器配置
 q    退出
 ```
 
 安装过程会实时显示当前阶段。下载 Claude/cpm 和 SSH 上传时同时显示已传输 MiB，远端检查阶段持续显示已用时间。
+
+### macOS 安全登录
+
+先按 `s` 完成远端设置，再按 `l` 登录远端 Claude。CPM 会让远端 `claude auth login` 保持等待，并在本机启动一个临时、隔离的 Google Chrome：
+
+- 浏览器流量经本机随机回环端口转入该机器配置的 SOCKS5 代理，代理凭据只保存在 CPM 内存中
+- 使用远端已经解析出的时区与语言，并为新页面持续注入相同设置
+- 登录浏览器强制全量走代理，不继承 `NO_PROXY`，避免认证域名因白名单误配而直连
+- 禁用 QUIC、非代理 WebRTC、扩展、同步、定位、摄像头和麦克风
+- 只打开经过校验的 Claude 官方 HTTPS OAuth 链接，链接不进入 Chrome 命令行
+- CPM 不读取登录页面，也不自动提取授权码
+
+用户在浏览器完成登录后，把页面显示的授权码粘贴到 TUI 的掩码输入框并按 Enter。授权码只经当前 SSH 会话的标准输入回填，不写入文件或命令行参数。登录结束或取消后，Chrome 会关闭，临时浏览器目录与本机代理立即删除。
 
 每台机器可以独立配置：
 
@@ -112,7 +125,6 @@ localhost,127.0.0.1,::1,naiveai-dev.com,.naiveai-dev.com,10.34.8.92
 ```bash
 cpm list
 cpm check dev
-cpm install dev
 cpm setup dev
 cpm enable dev
 cpm disable dev
