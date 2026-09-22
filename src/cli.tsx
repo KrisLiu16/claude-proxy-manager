@@ -13,7 +13,7 @@ const program = new Command();
 program
 	.name('cpm')
 	.description('通过 SSH 管理远端开发机的 claude-proxy')
-	.version('0.1.2')
+	.version('0.1.3')
 	.option('--config <path>', '本地配置文件路径');
 
 async function context(): Promise<{

@@ -22,6 +22,27 @@
 
 本地密码位于 `~/.config/claude-proxy-manager/secrets.json`，目录权限为 `0700`，文件权限为 `0600`。这样发布的单文件可执行程序不依赖平台原生扩展。
 
+## 安装与运行架构
+
+GitHub Release 分发的是本机运行的 `cpm` 单文件程序。GitHub Actions 使用 Bun 从本仓库的 TypeScript 源码构建它。
+
+开发机上的组件不从 GitHub 下载。执行 `cpm install` 或 TUI 中的安装操作时，链路是：
+
+```text
+本机 cpm
+  └─ 系统 ssh（读取 ~/.ssh/config 和 SSH agent）
+      ├─ 写入 ~/.local/bin/claude-proxy
+      └─ 写入 ~/.local/share/claude-proxy/socks_http_bridge.py
+```
+
+这两个文件已嵌入 `cpm`：
+
+- `claude-proxy` 是仓库 [`assets/claude-proxy`](assets/claude-proxy) 中的 POSIX shell 启动脚本，不是外部二进制。
+- `socks_http_bridge.py` 是仓库 [`assets/socks_http_bridge.py`](assets/socks_http_bridge.py) 中的 Python bridge。
+- 真正的 Claude Code CLI 由开发机原先安装。部署时记录它的绝对路径为 `CLAUDE_BIN`；`cpm` 不下载或替换官方 Claude 二进制。
+
+远端检查失败时，`cpm` 会回传 `claude-proxy --check` 的输出并显示在 `代理=FAILED` 下方。回传前会对 SOCKS5 URL 中的用户名和密码脱敏。
+
 ## 环境要求
 
 本机：
@@ -49,7 +70,7 @@ curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main
 安装指定版本：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main/install.sh | CPM_VERSION=v0.1.2 sh
+curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main/install.sh | CPM_VERSION=v0.1.3 sh
 ```
 
 安装器支持 Linux/macOS 的 x64 和 arm64，下载 GitHub Release 中的单文件可执行程序，并在安装前验证 SHA-256。连接终端时会显示实时进度条、百分比和 MiB；CI 或重定向输出时使用无控制字符的纯文本状态行。
@@ -59,7 +80,7 @@ curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main
 ```text
 CPM_INSTALL_DIR=/custom/bin   自定义安装目录
 CPM_NO_MODIFY_PATH=1         不修改 shell 配置
-CPM_VERSION=v0.1.2           安装固定版本
+CPM_VERSION=v0.1.3           安装固定版本
 ```
 
 开发环境：

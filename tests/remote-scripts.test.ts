@@ -4,7 +4,7 @@ import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {spawnSync} from 'node:child_process';
 import test from 'node:test';
-import {scriptsForTest} from '../src/ssh.js';
+import {parseCheckOutput, scriptsForTest} from '../src/ssh.js';
 
 test('apply script writes a private config and records the real Claude path', async () => {
 	const home = await mkdtemp(join(tmpdir(), 'cpm-apply-'));
@@ -44,6 +44,35 @@ test('toggle script uses a PATH shim and never overwrites the real Claude binary
 	assert.equal(await readFile(realClaude, 'utf8'), 'real claude');
 });
 
+test('check script returns a redacted launcher error', async () => {
+	const home = await mkdtemp(join(tmpdir(), 'cpm-check-'));
+	const localBin = join(home, '.local', 'bin');
+	const share = join(home, '.local', 'share', 'claude-proxy');
+	const configDir = join(home, '.config', 'claude-proxy');
+	await mkdir(localBin, {recursive: true});
+	await mkdir(share, {recursive: true});
+	await mkdir(configDir, {recursive: true});
+	await writeFile(join(localBin, 'claude-proxy'), '#!/bin/sh\necho "bad socks5h://test-user:test-password@proxy.example:8022" >&2\nexit 3\n', {mode: 0o755});
+	await writeFile(join(share, 'socks_http_bridge.py'), '# bridge\n');
+	await writeFile(join(configDir, 'config'), 'SOCKS5_PROXY=socks5h://test-user:test-password@proxy.example:8022\n', {mode: 0o600});
+	const result = spawnSync('sh', ['-s'], {
+		input: scriptsForTest.checkScript,
+		env: {...process.env, HOME: home},
+		encoding: 'utf8',
+	});
+	assert.equal(result.status, 0, result.stderr);
+	assert.match(result.stdout, /proxy_health=FAILED/);
+	const encoded = result.stdout.match(/^proxy_error_b64=(.+)$/m)?.[1];
+	assert.ok(encoded);
+	const diagnostic = Buffer.from(encoded, 'base64').toString('utf8');
+	assert.match(diagnostic, /bad socks5h:\/\/<redacted>@proxy\.example:8022/);
+	assert.equal(diagnostic.includes('test-password'), false);
+	const status = parseCheckOutput(result.stdout);
+	assert.equal(status.proxyHealth, 'FAILED');
+	assert.match(status.proxyError, /<redacted>@proxy\.example:8022/);
+	assert.equal(status.proxyError.includes('test-password'), false);
+});
+
 test('embedded remote scripts pass syntax checks', () => {
 	const launcher = resolve('assets/claude-proxy');
 	const bridge = resolve('assets/socks_http_bridge.py');
@@ -51,4 +80,3 @@ test('embedded remote scripts pass syntax checks', () => {
 	const python = spawnSync('python3', ['-c', 'import ast,sys; ast.parse(open(sys.argv[1]).read())', bridge]);
 	assert.equal(python.status, 0);
 });
-

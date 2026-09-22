@@ -28,11 +28,22 @@ else
   echo replace_claude=no
 fi
 if [ -x "$launcher" ] && [ -f "$config" ] && grep -q '^SOCKS5_PROXY=' "$config"; then
-  if timeout 35 "$launcher" --check >/dev/null 2>&1; then
+  health_log=$(mktemp /tmp/cpm-check.XXXXXX)
+  if timeout 35 "$launcher" --check >"$health_log" 2>&1; then
     echo proxy_health=OK
   else
     echo proxy_health=FAILED
+    proxy_error=$(python3 - "$health_log" <<'PY'
+import base64, pathlib, re, sys
+text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace")
+text = re.sub(r"(socks5h?://)[^@\s]+@", r"\1<redacted>@", text)
+text = text.strip()[-4096:]
+print(base64.b64encode(text.encode()).decode())
+PY
+    )
+    [ -z "$proxy_error" ] || printf 'proxy_error_b64=%s\n' "$proxy_error"
   fi
+  rm -f "$health_log"
 else
   echo proxy_health=NOT_CONFIGURED
 fi
@@ -162,24 +173,7 @@ export class SSHClient {
 
 	public async check(host: HostProfile): Promise<RemoteStatus> {
 		const output = await this.runScript(host.sshHost, checkScript, 60_000);
-		const values = new Map(
-			output.split('\n').filter(line => line.includes('=')).map(line => {
-				const index = line.indexOf('=');
-				return [line.slice(0, index), line.slice(index + 1)] as const;
-			}),
-		);
-		return {
-			connected: values.get('connected') === 'yes',
-			launcher: values.get('launcher') === 'yes',
-			bridge: values.get('bridge') === 'yes',
-			config: values.get('config') === 'yes',
-			configMode: values.get('config_mode') || '-',
-			proxyConfigured: values.get('proxy_configured') === 'yes',
-			realClaude: values.get('real_claude') || '',
-			replaceClaude: values.get('replace_claude') === 'yes',
-			noProxy: values.get('no_proxy') || '',
-			proxyHealth: values.get('proxy_health') || 'NOT_CHECKED',
-		};
+		return parseCheckOutput(output);
 	}
 
 	public async install(host: HostProfile): Promise<void> {
@@ -215,4 +209,38 @@ chmod 755 "$HOME/.local/bin/claude-proxy" "$HOME/.local/share/claude-proxy/socks
 	}
 }
 
-export const scriptsForTest = {applyScript, toggleScript};
+function decodeDiagnostic(encoded: string | undefined): string {
+	if (!encoded) return '';
+	try {
+		return Buffer.from(encoded, 'base64')
+			.toString('utf8')
+			.replace(/(socks5h?:\/\/)[^@\s]+@/gi, '$1<redacted>@')
+			.trim();
+	} catch {
+		return '远端检查失败，且诊断信息无法解码';
+	}
+}
+
+export function parseCheckOutput(output: string): RemoteStatus {
+	const values = new Map(
+		output.split('\n').filter(line => line.includes('=')).map(line => {
+			const index = line.indexOf('=');
+			return [line.slice(0, index), line.slice(index + 1)] as const;
+		}),
+	);
+	return {
+		connected: values.get('connected') === 'yes',
+		launcher: values.get('launcher') === 'yes',
+		bridge: values.get('bridge') === 'yes',
+		config: values.get('config') === 'yes',
+		configMode: values.get('config_mode') || '-',
+		proxyConfigured: values.get('proxy_configured') === 'yes',
+		realClaude: values.get('real_claude') || '',
+		replaceClaude: values.get('replace_claude') === 'yes',
+		noProxy: values.get('no_proxy') || '',
+		proxyHealth: values.get('proxy_health') || 'NOT_CHECKED',
+		proxyError: decodeDiagnostic(values.get('proxy_error_b64')),
+	};
+}
+
+export const scriptsForTest = {applyScript, checkScript, toggleScript};

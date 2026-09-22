@@ -19,6 +19,7 @@ export type RemoteStatus = {
 	replaceClaude: boolean;
 	noProxy: string;
 	proxyHealth: string;
+	proxyError: string;
 };
 
 export function validateHost(profile: HostProfile, requireProxy = false): void {
@@ -67,7 +68,7 @@ export function parseProxySpec(spec: string): {
 
 export function statusSummary(status: RemoteStatus): string {
 	const yn = (value: boolean) => (value ? '是' : '否');
-	return [
+	const summary = [
 		`连接=${yn(status.connected)}`,
 		`启动器=${yn(status.launcher)}`,
 		`配置=${yn(status.config)}(${status.configMode})`,
@@ -75,5 +76,5 @@ export function statusSummary(status: RemoteStatus): string {
 		`默认替换=${yn(status.replaceClaude)}`,
 		`白名单=${status.noProxy || '<空>'}`,
 	].join('  ');
+	return status.proxyError ? `${summary}\n报错:\n${status.proxyError}` : summary;
 }
-
