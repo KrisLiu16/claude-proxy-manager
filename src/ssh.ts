@@ -347,14 +347,16 @@ export class SSHClient {
 		}
 
 		try {
-			report(reporter, 55, '正在启动隔离的 Google Chrome 与内存代理');
+			report(reporter, 55, '正在等待 macOS 管理员授权，并用原 Profile 启动 Google Chrome');
 			browser = await openSecureClaudeLogin({
 				authorizationUrl,
 				proxyUrl: proxyUrl(host, password),
 				timezone: environment.timezone,
 				locale: environment.locale,
 			});
-			report(reporter, 100, '登录页已打开，请在浏览器登录后手动回填授权码');
+			report(reporter, 100, browser.timezoneChanged
+				? `登录页已打开，使用 Chrome ${browser.profileSource}；macOS 时区已临时从 ${browser.originalTimezone} 切换到 ${environment.timezone}`
+				: `登录页已打开，直接使用 Chrome ${browser.profileSource} 与原有 Cookie`);
 		} catch (error) {
 			controller.abort();
 			await exited.catch(() => 1);

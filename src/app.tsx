@@ -362,8 +362,8 @@ export function App({initialHosts, store, secrets, ssh, platform = process.platf
 	if (mode === 'login') {
 		return <Box flexDirection="column">
 			<Text bold color="cyan">远端 Claude 安全登录</Text>
-			<Text>已用隔离的 Google Chrome 打开官方登录页。</Text>
-			<Text dimColor>浏览器使用与开发机一致的代理、时区和语言；CPM 不读取网页或自动获取授权码。</Text>
+			<Text>已用正式 Google Chrome 和原 Profile 打开官方登录页，原有 Cookie 与站点状态会直接生效。</Text>
+			<Text dimColor>本次 Chrome 强制走开发机代理；macOS 时区会临时匹配出口并在结束后恢复。CPM 不读取网页或自动获取授权码。</Text>
 			<Box marginTop={1}>
 				<Text color="cyan">授权码: </Text>
 				<TextInput
