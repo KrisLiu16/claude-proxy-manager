@@ -27,7 +27,7 @@ curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main
 安装指定版本：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main/install.sh | CPM_VERSION=v0.5.1 sh
+curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main/install.sh | CPM_VERSION=v0.5.2 sh
 ```
 
 安装器支持 Linux/macOS 的 x64 和 arm64，验证 Release 资产的 SHA-256，默认写入 `~/.local/bin/cpm`。可用以下变量调整：
@@ -35,7 +35,7 @@ curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main
 ```text
 CPM_INSTALL_DIR=/custom/bin
 CPM_NO_MODIFY_PATH=1
-CPM_VERSION=v0.5.1
+CPM_VERSION=v0.5.2
 ```
 
 ## 工作方式
@@ -82,6 +82,8 @@ q    退出
 ```
 
 安装过程会实时显示当前阶段。下载 Claude/cpm 和 SSH 上传时同时显示已传输 MiB，远端检查阶段持续显示已用时间。
+
+`s` 是幂等操作：开发机已有 Claude Code 时直接复用；远端 `cpm --version` 与当前管理器版本一致时，跳过 cpm 下载、校验和 SSH 上传。代理、白名单、时区、语言、默认替换开关与最终检查仍会正常执行。
 
 ### macOS 安全登录
 

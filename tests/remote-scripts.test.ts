@@ -6,6 +6,7 @@ import {spawnSync} from 'node:child_process';
 import test from 'node:test';
 import {scriptsForTest} from '../src/ssh.js';
 import {toggleRemote} from '../src/remote.js';
+import {VERSION} from '../src/version.js';
 
 test('remote toggle creates a cpm proxy shim and edits shell files', async () => {
 	const home = await mkdtemp(join(tmpdir(), 'cpm-toggle-'));
@@ -29,12 +30,19 @@ test('Claude probe detects a missing binary and installer places the streamed ex
 	const probe = spawnSync('sh', ['-s'], {input: scriptsForTest.claudeProbeScript, env: {...process.env, HOME: home, PATH: '/usr/bin:/bin'}, encoding: 'utf8'});
 	assert.equal(probe.status, 0, probe.stderr);
 	assert.match(probe.stdout, /^claude_path=$/m);
+	assert.match(probe.stdout, /^cpm_path=$/m);
+	assert.match(probe.stdout, /^cpm_version=$/m);
 	assert.match(probe.stdout, /^platform=linux-(x64|arm64)(-musl)?$/m);
 	const fakeClaude = '#!/bin/sh\necho "9.9.9 (Claude Code)"\n';
 	const installed = spawnSync('sh', ['-c', scriptsForTest.installClaudeScript], {input: fakeClaude, env: {...process.env, HOME: home}, encoding: 'utf8'});
 	assert.equal(installed.status, 0, installed.stderr);
 	assert.match(installed.stdout, /claude_version=9\.9\.9 \(Claude Code\)/);
 	assert.equal(await readFile(join(home, '.local', 'bin', 'claude'), 'utf8'), fakeClaude);
+	await writeFile(join(home, '.local', 'bin', 'cpm'), `#!/bin/sh\necho "${VERSION}"\n`, {mode: 0o755});
+	const installedProbe = spawnSync('sh', ['-s'], {input: scriptsForTest.claudeProbeScript, env: {...process.env, HOME: home, PATH: '/usr/bin:/bin'}, encoding: 'utf8'});
+	assert.equal(installedProbe.status, 0, installedProbe.stderr);
+	assert.match(installedProbe.stdout, /^claude_version=9\.9\.9 \(Claude Code\)$/m);
+	assert.match(installedProbe.stdout, new RegExp(`^cpm_version=${VERSION.replaceAll('.', '\\.')}$`, 'm'));
 });
 
 test('runtime installer accepts one cpm executable and installs no launcher or bridge asset', async () => {

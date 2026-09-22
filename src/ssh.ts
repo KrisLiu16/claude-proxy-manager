@@ -6,6 +6,7 @@ import {validateHost} from './types.js';
 import {downloadOfficialClaude, type ClaudePlatform} from './official-claude.js';
 import {runtimeForRemote} from './runtime-distribution.js';
 import {openSecureClaudeLogin, type SecureLoginBrowser} from './browser-login.js';
+import {VERSION} from './version.js';
 
 export type OperationProgress = {percent: number; label: string};
 export type ProgressReporter = (progress: OperationProgress) => void;
@@ -53,6 +54,19 @@ if [ -z "$claude_path" ]; then
   done
 fi
 printf 'claude_path=%s\n' "$claude_path"
+if [ -n "$claude_path" ]; then
+  claude_version=$("$claude_path" --version 2>/dev/null | sed -n '1p' || true)
+  printf 'claude_version=%s\n' "$claude_version"
+fi
+cpm_path="$HOME/.local/bin/cpm"
+if [ -x "$cpm_path" ]; then
+  cpm_version=$("$cpm_path" --version 2>/dev/null | sed -n '1p' || true)
+  printf 'cpm_path=%s\n' "$cpm_path"
+  printf 'cpm_version=%s\n' "$cpm_version"
+else
+  printf 'cpm_path=\n'
+  printf 'cpm_version=\n'
+fi
 case "$(uname -s)-$(uname -m)" in
   Linux-x86_64|Linux-amd64) platform=linux-x64 ;;
   Linux-aarch64|Linux-arm64) platform=linux-arm64 ;;
@@ -223,12 +237,17 @@ export class SSHClient {
 	}
 
 	private async installSteps(host: HostProfile, reporter?: ProgressReporter): Promise<void> {
-		await this.ensureClaude(host, scoped(reporter, 0, 52));
-		report(reporter, 56, '正在确认开发机平台');
 		const probe = await this.probe(host);
+		await this.ensureClaude(host, scoped(reporter, 0, 52), probe);
+		report(reporter, 56, '正在确认开发机平台和 cpm 版本');
 		if (probe.get('unsupported')) throw new Error(`cpm 不支持远端平台 ${probe.get('unsupported')}`);
 		const platform = probe.get('platform') as ClaudePlatform | undefined;
 		if (!platform) throw new Error('无法识别远端平台');
+		if (probe.get('cpm_path') && probe.get('cpm_version') === VERSION) {
+			report(reporter, 64, `远端 cpm ${VERSION} 已是当前版本，跳过下载和上传`);
+			report(reporter, 100, 'Claude 与 cpm 运行时已就绪');
+			return;
+		}
 		report(reporter, 64, `正在准备 ${platform} 的 cpm 运行时`);
 		const runtime = await runtimeForRemote(platform, transferReporter(reporter, 64, 76, '正在下载并校验 cpm'));
 		try {
@@ -239,12 +258,12 @@ export class SSHClient {
 		finally { await runtime.cleanup(); }
 	}
 
-	public async ensureClaude(host: HostProfile, reporter?: ProgressReporter): Promise<{path: string; version: string; installed: boolean}> {
+	private async ensureClaude(host: HostProfile, reporter: ProgressReporter | undefined, probe: Map<string, string>): Promise<{path: string; version: string; installed: boolean}> {
 		report(reporter, 5, '正在检查开发机上的 Claude Code');
-		const probe = await this.probe(host);
 		if (probe.get('claude_path')) {
-			report(reporter, 100, '开发机已安装 Claude Code');
-			return {path: probe.get('claude_path')!, version: '', installed: false};
+			const version = probe.get('claude_version') || '';
+			report(reporter, 100, `开发机已安装 Claude Code${version ? ` ${version}` : ''}，跳过下载和上传`);
+			return {path: probe.get('claude_path')!, version, installed: false};
 		}
 		if (probe.get('unsupported')) throw new Error(`Claude Code 不支持远端平台 ${probe.get('unsupported')}`);
 		const platform = probe.get('platform') as ClaudePlatform | undefined;
