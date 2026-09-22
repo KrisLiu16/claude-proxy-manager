@@ -17,5 +17,5 @@ jobs:
         with:
           node-version: 24
           cache: npm
-      - run: npm ci
+      - run: npm ci --registry=https://registry.npmjs.org/
       - run: npm run check

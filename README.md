@@ -49,7 +49,7 @@ curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main
 安装指定版本：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main/install.sh | CPM_VERSION=v0.1.0 sh
+curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main/install.sh | CPM_VERSION=v0.1.1 sh
 ```
 
 安装器支持 Linux/macOS 的 x64 和 arm64，下载 GitHub Release 中的单文件可执行程序，并在安装前验证 SHA-256。默认安装到 `~/.local/bin/cpm`，可通过 `CPM_INSTALL_DIR` 修改。

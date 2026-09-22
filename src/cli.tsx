@@ -13,7 +13,7 @@ const program = new Command();
 program
 	.name('cpm')
 	.description('通过 SSH 管理远端开发机的 claude-proxy')
-	.version('0.1.0')
+	.version('0.1.1')
 	.option('--config <path>', '本地配置文件路径');
 
 async function context(): Promise<{
@@ -81,4 +81,3 @@ program.parseAsync().catch(error => {
 	console.error(`cpm: ${(error as Error).message}`);
 	process.exitCode = 1;
 });
-
