@@ -5,7 +5,7 @@ import type {HostProfile, RemoteStatus} from './types.js';
 import {validateHost} from './types.js';
 import {downloadOfficialClaude, type ClaudePlatform} from './official-claude.js';
 import {runtimeForRemote} from './runtime-distribution.js';
-import {openSecureClaudeLogin, type SecureLoginBrowser} from './browser-login.js';
+import {openSecureBrowser, openSecureClaudeLogin, type SecureLoginBrowser} from './browser-login.js';
 import {VERSION} from './version.js';
 
 export type OperationProgress = {percent: number; label: string};
@@ -15,6 +15,11 @@ export type RemoteLoginSession = {
 	authorizationUrl: string;
 	submit: (authorizationCode: string, reporter?: ProgressReporter) => Promise<void>;
 	cancel: () => Promise<void>;
+};
+
+export type BrowserSession = {
+	profileSource: string;
+	close: () => Promise<void>;
 };
 
 function report(reporter: ProgressReporter | undefined, percent: number, label: string): void {
@@ -217,6 +222,22 @@ export class SSHClient {
 		return parseValues(await this.runScript(host.sshHost, claudeProbeScript, 30_000));
 	}
 
+	private async remoteEnvironment(host: HostProfile): Promise<{timezone: string; locale: string}> {
+		let environment: {timezone: string; locale: string};
+		try {
+			environment = JSON.parse(await this.run(
+				host.sshHost,
+				'if [ -x "$HOME/.local/bin/cpm" ]; then exec "$HOME/.local/bin/cpm" __remote-environment; else echo CPM_NOT_INSTALLED; exit 7; fi',
+				'',
+				90_000,
+			)) as typeof environment;
+		} catch (error) {
+			throw new Error(`无法读取远端代理环境，请先按 s 完成设置：${(error as Error).message}`);
+		}
+		if (!environment.timezone || !environment.locale) throw new Error('远端 cpm 返回了无效的时区或语言配置');
+		return environment;
+	}
+
 	public async check(host: HostProfile, reporter?: ProgressReporter): Promise<RemoteStatus> {
 		report(reporter, 5, `正在通过 SSH 连接 ${host.name}`);
 		report(reporter, 15, '正在执行远端逐项检查（出口 IP、时区、地理信息）');
@@ -317,20 +338,7 @@ export class SSHClient {
 		validateHost(host, true);
 		if (!password || /[\r\n]/.test(password)) throw new Error('代理密码不能为空且不能包含换行');
 		report(reporter, 8, `正在通过 SSH 连接 ${host.name}`);
-		let environment: {timezone: string; locale: string};
-		try {
-			environment = JSON.parse(await this.run(
-				host.sshHost,
-				'if [ -x "$HOME/.local/bin/cpm" ]; then exec "$HOME/.local/bin/cpm" __remote-environment; else echo CPM_NOT_INSTALLED; exit 7; fi',
-				'',
-				90_000,
-			)) as typeof environment;
-		} catch (error) {
-			throw new Error(`无法读取远端代理环境，请先按 s 完成设置：${(error as Error).message}`);
-		}
-		if (!environment.timezone || !environment.locale) {
-			throw new Error('远端 cpm 返回了无效的时区或语言配置');
-		}
+		const environment = await this.remoteEnvironment(host);
 		report(reporter, 24, `登录环境：${environment.timezone} / ${environment.locale}`);
 
 		const controller = new AbortController();
@@ -419,6 +427,23 @@ export class SSHClient {
 				await cleanup();
 			},
 		};
+	}
+
+	public async openBrowser(host: HostProfile, password: string, reporter?: ProgressReporter): Promise<BrowserSession> {
+		if (process.platform !== 'darwin') throw new Error('安全浏览器目前只支持 macOS');
+		validateHost(host, true);
+		if (!password || /[\r\n]/.test(password)) throw new Error('代理密码不能为空且不能包含换行');
+		report(reporter, 10, `正在读取 ${host.name} 的代理环境`);
+		const environment = await this.remoteEnvironment(host);
+		report(reporter, 30, `安全浏览器环境：${environment.timezone} / ${environment.locale}`);
+		report(reporter, 50, '正在等待 macOS 管理员授权，并用原 Profile 启动 Google Chrome');
+		const browser = await openSecureBrowser({
+			proxyUrl: proxyUrl(host, password),
+			timezone: environment.timezone,
+			locale: environment.locale,
+		});
+		report(reporter, 100, `安全浏览器已通过 CPM 探针和 SOCKS5 隧道；使用 Chrome ${browser.profileSource}`);
+		return {profileSource: browser.profileSource, close: () => browser.close()};
 	}
 }
 

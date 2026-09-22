@@ -40,4 +40,5 @@ test('TUI shows remote Claude login on macOS', () => {
 		platform="darwin"
 	/>);
 	assert.match(output, /l 登录远端 Claude/);
+	assert.match(output, /g\s+安全浏览器/);
 });

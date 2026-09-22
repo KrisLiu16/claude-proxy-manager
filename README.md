@@ -27,7 +27,7 @@ curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main
 安装指定版本：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main/install.sh | CPM_VERSION=v0.5.4 sh
+curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main/install.sh | CPM_VERSION=v0.6.0 sh
 ```
 
 安装器支持 Linux/macOS 的 x64 和 arm64，验证 Release 资产的 SHA-256，默认写入 `~/.local/bin/cpm`。可用以下变量调整：
@@ -35,7 +35,7 @@ curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main
 ```text
 CPM_INSTALL_DIR=/custom/bin
 CPM_NO_MODIFY_PATH=1
-CPM_VERSION=v0.5.4
+CPM_VERSION=v0.6.0
 ```
 
 ## 工作方式
@@ -76,6 +76,7 @@ e    编辑机器
 c    逐项检查
 s    安装、配置、切换默认替换并检查
 l    在 macOS 上登录远端 Claude
+g    在 macOS 上打开 CPM 安全浏览器
 t    切换 claude → cpm proxy
 d    删除本地机器配置
 q    退出
@@ -93,7 +94,8 @@ q    退出
 - 直接使用最近打开的原 Chrome Profile，现有 Cookie、Local Storage 和登录状态原生生效，不复制或解密 Cookie
 - Cookie 和站点状态来自原 Profile；扩展在本次登录中禁用，避免代理扩展或 PAC 把部分域名改成直连
 - 本次使用独立空缓存目录，避免 IP 检测网站读到原 Profile 中缓存的旧出口结果
-- 使用启动参数设置浏览器语言；登录前经 macOS 管理员授权临时切换系统时区，正常完成或取消后再恢复原时区
+- Chrome 完全退出后，临时设置原 Profile 的 `intl.accept_languages` 与 `intl.selected_languages`，使 `navigator.languages` 和请求语言匹配出口；登录结束后只恢复这两个字段
+- 登录前经 macOS 管理员授权临时切换系统时区，正常完成或取消后再恢复原时区
 - 登录浏览器强制全量走代理，不继承 `NO_PROXY`，避免认证域名因白名单误配而直连
 - 整个 Chrome 实例的 HTTP/HTTPS 流量使用 CPM 本机代理，并禁用 DNS 预取、QUIC 与非代理 WebRTC UDP
 - Chrome 首先访问随机的 `cpm.internal` 探针；只有 CPM bridge 收到请求并通过所配置的 SOCKS5 成功建立 HTTPS 隧道才继续，任一步失败都会关闭并报错
@@ -105,6 +107,8 @@ q    退出
 需要人工确认时，可在该 Chrome 实例中新开标签访问 `https://ip.net.coffee/claude/`。中国出口 IPv4、Cloudflare 出口和 Claude AI 出口应一致，WebRTC UDP 项不应显示不同的公网 IP。独立空缓存会避免读取原 Profile 中旧的 IP 检测结果。
 
 如果 CPM、Chrome 或 macOS 在登录期间异常终止，自动恢复步骤可能来不及执行，此时需要用户在 macOS“日期与时间”设置中手动改回原时区。
+
+按 `g` 可以只启动安全浏览器，不运行远端 `claude auth login`。它默认打开 `https://ip.net.coffee/claude/`，使用与 `l` 完全相同的原 Profile、CPM 代理、临时语言、临时时区和防直连配置。回到 TUI 按 Esc 或 Enter 后关闭浏览器并恢复环境。
 
 每台机器可以独立配置：
 

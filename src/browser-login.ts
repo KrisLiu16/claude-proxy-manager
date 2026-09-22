@@ -1,5 +1,6 @@
 import {spawn, type ChildProcess} from 'node:child_process';
-import {access, mkdtemp, readFile, rm} from 'node:fs/promises';
+import {randomUUID} from 'node:crypto';
+import {access, chmod, mkdtemp, readFile, rename, rm, stat, writeFile} from 'node:fs/promises';
 import {constants as fsConstants} from 'node:fs';
 import {homedir, tmpdir} from 'node:os';
 import {join} from 'node:path';
@@ -11,11 +12,12 @@ const CHROME_ROOT = join(homedir(), 'Library', 'Application Support', 'Google', 
 const AUTH_HOSTS = new Set(['claude.ai', 'claude.com', 'platform.claude.com', 'console.anthropic.com']);
 
 type SecureBrowserOptions = {
-	authorizationUrl: string;
 	proxyUrl: string;
 	timezone: string;
 	locale: string;
 };
+
+type ClaudeLoginBrowserOptions = SecureBrowserOptions & {authorizationUrl: string};
 
 export type SecureLoginBrowser = {
 	profileSource: string;
@@ -23,6 +25,9 @@ export type SecureLoginBrowser = {
 	originalTimezone: string;
 	close: () => Promise<void>;
 };
+
+type ChromeLanguageLease = {restore: () => Promise<void>};
+type StoredPreference = {present: boolean; value: unknown};
 
 export function validateClaudeAuthorizationUrl(value: string): URL {
 	let url: URL;
@@ -58,9 +63,54 @@ export async function lastUsedChromeProfile(chromeRoot = CHROME_ROOT): Promise<s
 	return 'Default';
 }
 
+async function writePreferences(path: string, value: Record<string, any>): Promise<void> {
+	let mode = 0o600;
+	try { mode = (await stat(path)).mode & 0o777; } catch {}
+	const temporary = `${path}.cpm-${randomUUID()}`;
+	await writeFile(temporary, JSON.stringify(value), {mode});
+	await rename(temporary, path);
+	await chmod(path, mode);
+}
+
+function storedPreference(object: Record<string, any>, key: string): StoredPreference {
+	return {present: Object.hasOwn(object, key), value: object[key]};
+}
+
+function restorePreference(object: Record<string, any>, key: string, stored: StoredPreference): void {
+	if (stored.present) object[key] = stored.value;
+	else delete object[key];
+}
+
+export async function applyChromeProfileLanguage(chromeRoot: string, profileName: string, locale: string): Promise<ChromeLanguageLease> {
+	const path = join(chromeRoot, profileName, 'Preferences');
+	let preferences: Record<string, any>;
+	try { preferences = JSON.parse(await readFile(path, 'utf8')) as Record<string, any>; }
+	catch (error) { throw new Error(`无法读取 Chrome ${profileName} 的语言配置：${(error as Error).message}`); }
+	const intl = preferences.intl && typeof preferences.intl === 'object' ? preferences.intl as Record<string, any> : {};
+	const originalAccept = storedPreference(intl, 'accept_languages');
+	const originalSelected = storedPreference(intl, 'selected_languages');
+	const languages = `${locale},${locale.split('-')[0]}`;
+	preferences.intl = {...intl, accept_languages: languages, selected_languages: languages};
+	await writePreferences(path, preferences);
+	let restored = false;
+	return {
+		restore: async () => {
+			if (restored) return;
+			restored = true;
+			const current = JSON.parse(await readFile(path, 'utf8')) as Record<string, any>;
+			const currentIntl = current.intl && typeof current.intl === 'object' ? current.intl as Record<string, any> : {};
+			restorePreference(currentIntl, 'accept_languages', originalAccept);
+			restorePreference(currentIntl, 'selected_languages', originalSelected);
+			current.intl = currentIntl;
+			await writePreferences(path, current);
+		},
+	};
+}
+
 export function chromeNetworkArguments(port: number, locale: string, cacheDir: string): string[] {
 	return [
 		'--disable-extensions',
+		'--disable-sync',
 		'--disable-quic',
 		'--dns-prefetch-disable',
 		'--disable-features=MediaRouter',
@@ -91,25 +141,26 @@ async function waitForExit(child: ChildProcess): Promise<void> {
 	await new Promise<void>(resolve => child.once('exit', () => resolve()));
 }
 
-export async function openSecureClaudeLogin(options: SecureBrowserOptions): Promise<SecureLoginBrowser> {
-	if (process.platform !== 'darwin') throw new Error('远端 Claude 登录目前只支持 macOS');
-	const authorizationUrl = validateClaudeAuthorizationUrl(options.authorizationUrl);
+async function openConfiguredBrowser(options: SecureBrowserOptions, startUrl: URL): Promise<SecureLoginBrowser> {
+	if (process.platform !== 'darwin') throw new Error('CPM 安全浏览器目前只支持 macOS');
 	validateTimezone(options.timezone);
 	const locale = browserLocale(options.locale);
 	try { await access(CHROME_PATH, fsConstants.X_OK); }
 	catch { throw new Error('没有找到 Google Chrome，请先安装到 /Applications'); }
 	if (await isChromeRunning()) {
-		throw new Error('请先用 ⌘Q 完全退出 Google Chrome，再按 l 登录；否则 Chrome 会忽略本次代理参数');
+		throw new Error('请先用 ⌘Q 完全退出 Google Chrome，再按 l 或 g；否则 Chrome 会忽略本次代理参数');
 	}
 
 	let bridge: EphemeralBridge | undefined;
 	let timezone: MacTimezoneLease | undefined;
+	let language: ChromeLanguageLease | undefined;
 	let cacheDir = '';
 	let child: ChildProcess | undefined;
 	let killWithParent: (() => void) | undefined;
 	try {
 		const profileName = await lastUsedChromeProfile();
-		bridge = await startEphemeralBridge(options.proxyUrl, authorizationUrl.toString());
+		language = await applyChromeProfileLanguage(CHROME_ROOT, profileName, locale);
+		bridge = await startEphemeralBridge(options.proxyUrl, startUrl.toString());
 		timezone = await acquireMacTimezone(options.timezone);
 		cacheDir = await mkdtemp(join(tmpdir(), 'cpm-chrome-cache-'));
 		child = spawn(CHROME_PATH, [
@@ -152,7 +203,10 @@ export async function openSecureClaudeLogin(options: SecureBrowserOptions): Prom
 				if (child) await waitForExit(child);
 				await bridge?.close();
 				try { await timezone?.restore(); }
-				finally { if (cacheDir) await rm(cacheDir, {recursive: true, force: true}); }
+				finally {
+					try { await language?.restore(); }
+					finally { if (cacheDir) await rm(cacheDir, {recursive: true, force: true}); }
+				}
 			},
 		};
 	} catch (error) {
@@ -161,7 +215,19 @@ export async function openSecureClaudeLogin(options: SecureBrowserOptions): Prom
 		if (child) await waitForExit(child);
 		await bridge?.close();
 		try { await timezone?.restore(); }
-		finally { if (cacheDir) await rm(cacheDir, {recursive: true, force: true}); }
+		finally {
+			try { await language?.restore(); }
+			finally { if (cacheDir) await rm(cacheDir, {recursive: true, force: true}); }
+		}
 		throw error;
 	}
+}
+
+export async function openSecureClaudeLogin(options: ClaudeLoginBrowserOptions): Promise<SecureLoginBrowser> {
+	const authorizationUrl = validateClaudeAuthorizationUrl(options.authorizationUrl);
+	return await openConfiguredBrowser(options, authorizationUrl);
+}
+
+export async function openSecureBrowser(options: SecureBrowserOptions): Promise<SecureLoginBrowser> {
+	return await openConfiguredBrowser(options, new URL('https://ip.net.coffee/claude/'));
 }

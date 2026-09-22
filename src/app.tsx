@@ -6,7 +6,7 @@ import type {SecretStore} from './secrets.js';
 import type {HostProfile} from './types.js';
 import {DEFAULT_LOCALE, DEFAULT_TIMEZONE, normalizeNoProxy, parseProxySpec, statusSummary, validateHost} from './types.js';
 import type {SSHClient} from './ssh.js';
-import type {OperationProgress, ProgressReporter, RemoteLoginSession} from './ssh.js';
+import type {BrowserSession, OperationProgress, ProgressReporter, RemoteLoginSession} from './ssh.js';
 
 type Props = {
 	initialHosts: HostProfile[];
@@ -75,7 +75,7 @@ export function App({initialHosts, store, secrets, ssh, platform = process.platf
 	const {exit} = useApp();
 	const [hosts, setHosts] = useState(initialHosts);
 	const [cursor, setCursor] = useState(0);
-	const [mode, setMode] = useState<'list' | 'edit' | 'login'>('list');
+	const [mode, setMode] = useState<'list' | 'edit' | 'login' | 'browser'>('list');
 	const [form, setForm] = useState<FormState>(emptyForm);
 	const [focus, setFocus] = useState(0);
 	const [originalName, setOriginalName] = useState('');
@@ -87,6 +87,7 @@ export function App({initialHosts, store, secrets, ssh, platform = process.platf
 	const [pendingDelete, setPendingDelete] = useState('');
 	const [authorizationCode, setAuthorizationCode] = useState('');
 	const [loginSession, setLoginSession] = useState<RemoteLoginSession>();
+	const [browserSession, setBrowserSession] = useState<BrowserSession>();
 	const sessionPasswords = useRef(new Map<string, string>());
 
 	const selected = hosts[cursor];
@@ -264,7 +265,39 @@ export function App({initialHosts, store, secrets, ssh, platform = process.platf
 		await session?.cancel();
 	}
 
+	async function beginBrowser(host: HostProfile, password: string): Promise<void> {
+		await runOperation(`正在准备 ${host.name} 的安全浏览器`, async reporter => {
+			const session = await ssh.openBrowser(host, password, reporter);
+			setBrowserSession(session);
+			setMode('browser');
+			return `安全浏览器已打开，使用 Chrome ${session.profileSource}`;
+		});
+	}
+
+	async function closeBrowser(): Promise<void> {
+		const session = browserSession;
+		setBrowserSession(undefined);
+		setMode('list');
+		setBusy(true);
+		setStatus('正在关闭安全浏览器并恢复语言与时区');
+		setStatusColor('white');
+		try {
+			await session?.close();
+			setStatus('安全浏览器已关闭，语言与时区已恢复');
+			setStatusColor('green');
+		} catch (error) {
+			setStatus((error as Error).message);
+			setStatusColor('red');
+		} finally {
+			setBusy(false);
+		}
+	}
+
 	useInput((input, key) => {
+		if (mode === 'browser' && (key.escape || key.return || (key.ctrl && input === 'c'))) {
+			void closeBrowser();
+			return;
+		}
 		if (mode === 'login' && (key.escape || (key.ctrl && input === 'c'))) {
 			void cancelLogin();
 			return;
@@ -327,6 +360,14 @@ export function App({initialHosts, store, secrets, ssh, platform = process.platf
 				return;
 			}
 			void beginLogin(selected, password);
+		} else if (input === 'g' && selected && platform === 'darwin') {
+			const password = passwordFor(selected.name);
+			if (!password) {
+				setStatus('没有可用的代理密码；按 e 编辑并输入密码');
+				setStatusColor('red');
+				return;
+			}
+			void beginBrowser(selected, password);
 		} else if (input === 't' && selected) {
 			const nextHost = {...selected, replaceClaude: !selected.replaceClaude};
 			void runOperation('正在切换默认 claude', async reporter => {
@@ -359,12 +400,25 @@ export function App({initialHosts, store, secrets, ssh, platform = process.platf
 		}
 	});
 
+	if (mode === 'browser') {
+		return <Box flexDirection="column">
+			<Text bold color="cyan">CPM 安全浏览器</Text>
+			<Text color="green">✓ Chrome 已命中 CPM 本机探针，并通过所配置的 SOCKS5 建立了 HTTPS 隧道。</Text>
+			<Text>已打开 IP 检测页；整个 Chrome 实例使用所选机器的代理、语言和时区。</Text>
+			<Text dimColor>Cookie 与站点状态来自原 Profile；扩展、旧缓存、QUIC 和非代理 UDP 在本次会话中禁用。</Text>
+			<Box borderStyle="round" borderColor={statusColor} paddingX={1} marginTop={1}>
+				<Text color={statusColor}>{status}</Text>
+			</Box>
+			<Box marginTop={1}><Text dimColor>回到此处按 Esc 或 Enter 关闭浏览器并恢复语言与时区</Text></Box>
+		</Box>;
+	}
+
 	if (mode === 'login') {
 		return <Box flexDirection="column">
 			<Text bold color="cyan">远端 Claude 安全登录</Text>
 			<Text>已用正式 Google Chrome 和原 Profile 打开官方登录页，原有 Cookie 与站点状态会直接生效。</Text>
 			<Text color="green">✓ Chrome 已命中 CPM 本机探针，并通过所配置的 SOCKS5 建立了 HTTPS 隧道。</Text>
-			<Text dimColor>整个 Chrome 实例强制走开发机代理，禁用扩展、旧缓存、QUIC 和非代理 UDP；时区结束后恢复。</Text>
+			<Text dimColor>整个 Chrome 实例强制走开发机代理；Profile 语言与 macOS 时区临时匹配出口，结束后恢复。</Text>
 			<Text dimColor>可在新标签打开 https://ip.net.coffee/claude/ 验证，三个出口 IP 应一致且 WebRTC 不应泄露。</Text>
 			<Box marginTop={1}>
 				<Text color="cyan">授权码: </Text>
@@ -421,6 +475,6 @@ export function App({initialHosts, store, secrets, ssh, platform = process.platf
 				? `… ${progressBar(progress.percent)} ${String(progress.percent).padStart(3)}%  ${status}\n  已用 ${elapsedSeconds}s`
 				: status}</Text>
 		</Box>
-		<Box marginTop={1}><Text dimColor>↑/↓ 选择  a 添加  e 编辑  c 逐项检查  s 一键设置{platform === 'darwin' ? '  l 登录远端 Claude' : ''}  t 切换默认替换  d 删除  q 退出</Text></Box>
+		<Box marginTop={1}><Text dimColor>↑/↓ 选择  a 添加  e 编辑  c 逐项检查  s 一键设置{platform === 'darwin' ? '  l 登录远端 Claude  g 安全浏览器' : ''}  t 切换默认替换  d 删除  q 退出</Text></Box>
 	</Box>;
 }
