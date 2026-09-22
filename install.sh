@@ -1,5 +1,5 @@
 #!/bin/sh
-# Claude Proxy Manager installer. CPM_INSTALL_DIR changes the destination;
+# CPM installer. CPM_INSTALL_DIR changes the destination;
 # CPM_NO_MODIFY_PATH=1 leaves shell startup files untouched; CPM_VERSION pins a release.
 set -eu
 
@@ -83,7 +83,7 @@ draw() {
     "$percent" "$(mib "$1")" "$(mib "$SIZE")"
 }
 
-printf '\n  %sClaude Proxy Manager%s %s%s%s\n\n' "$BOLD" "$RESET" "$DIM" "$VERSION" "$RESET"
+printf '\n  %sCPM%s %s%s%s\n\n' "$BOLD" "$RESET" "$DIM" "$VERSION" "$RESET"
 row "平台" "$PLATFORM"
 row "来源" "github.com/$REPO"
 
@@ -146,7 +146,7 @@ else
   add_line() {
     if ! grep -qsF -e "$2" "$1"; then
       mkdir -p "$(dirname "$1")"
-      printf '\n# Claude Proxy Manager\n%s\n' "$2" >> "$1"
+      printf '\n# CPM\n%s\n' "$2" >> "$1"
       WROTE="$WROTE $(short "$1")"
     fi
   }

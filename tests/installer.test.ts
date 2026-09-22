@@ -44,7 +44,7 @@ esac
 		encoding: 'utf8',
 	});
 	assert.equal(result.status, 0, result.stderr);
-	assert.match(result.stdout, /Claude Proxy Manager v9\.9\.9/);
+	assert.match(result.stdout, /CPM v9\.9\.9/);
 	for (const label of ['平台', '来源', '下载', '校验', '安装', '路径', '启动']) {
 		assert.match(result.stdout, new RegExp(label));
 	}
@@ -52,6 +52,5 @@ esac
 	const installed = join(home, '.local', 'bin', 'cpm');
 	assert.deepEqual(await readFile(installed), fixture);
 	assert.equal((await stat(installed)).mode & 0o777, 0o755);
-	assert.match(await readFile(join(home, '.profile'), 'utf8'), /Claude Proxy Manager/);
+	assert.match(await readFile(join(home, '.profile'), 'utf8'), /# CPM/);
 });
-
