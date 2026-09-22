@@ -59,7 +59,7 @@ function emptyForm(): FormState {
 		timezone: DEFAULT_TIMEZONE,
 		locale: DEFAULT_LOCALE,
 		claudeConfigDir: '',
-		replaceClaude: false,
+		replaceClaude: true,
 	};
 }
 

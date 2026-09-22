@@ -26,7 +26,7 @@ curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main
 安装指定版本：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main/install.sh | CPM_VERSION=v0.3.0 sh
+curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main/install.sh | CPM_VERSION=v0.3.1 sh
 ```
 
 安装器支持 Linux/macOS 的 x64 和 arm64，验证 Release 资产的 SHA-256，默认写入 `~/.local/bin/cpm`。可用以下变量调整：
@@ -34,7 +34,7 @@ curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main
 ```text
 CPM_INSTALL_DIR=/custom/bin
 CPM_NO_MODIFY_PATH=1
-CPM_VERSION=v0.3.0
+CPM_VERSION=v0.3.1
 ```
 
 ## 工作方式
@@ -88,7 +88,7 @@ q    退出
 - Claude 进程时区，默认 `auto`，根据代理出口注入 IANA 时区
 - Claude 进程 locale，默认 `auto`，根据出口国家与语言注入
 - 可选的 `CLAUDE_CONFIG_DIR`，用于需要独立或持久化 Claude 状态的开发机
-- 是否让 `claude` 默认执行 `cpm proxy`
+- 是否让 `claude` 默认执行 `cpm proxy`，新建机器默认开启
 
 代理也可以用一行快速导入：
 
