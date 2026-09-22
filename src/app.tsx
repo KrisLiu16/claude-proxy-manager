@@ -41,8 +41,8 @@ const labels: Record<FieldName, string> = {
 	proxyUser: '代理用户',
 	password: '代理密码',
 	noProxy: 'NO_PROXY（逗号分隔）',
-	timezone: 'Claude 进程时区',
-	locale: 'Claude 进程 locale',
+	timezone: 'Claude 进程时区（auto 自动）',
+	locale: 'Claude 进程 locale（auto 自动）',
 	claudeConfigDir: 'CLAUDE_CONFIG_DIR（可选）',
 };
 

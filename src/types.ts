@@ -1,5 +1,5 @@
-export const DEFAULT_TIMEZONE = 'America/Los_Angeles';
-export const DEFAULT_LOCALE = 'en_US.UTF-8';
+export const DEFAULT_TIMEZONE = 'auto';
+export const DEFAULT_LOCALE = 'auto';
 
 export type HostProfile = {
 	name: string;

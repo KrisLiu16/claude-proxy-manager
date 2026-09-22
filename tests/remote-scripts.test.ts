@@ -40,7 +40,7 @@ test('Claude probe detects a missing binary and installer places the streamed ex
 test('runtime installer accepts one cpm executable and installs no launcher or bridge asset', async () => {
 	const home = await mkdtemp(join(tmpdir(), 'cpm-runtime-install-'));
 	await mkdir(join(home, '.local', 'bin'), {recursive: true});
-	const fakeCpm = '#!/bin/sh\n[ "$1" = "--version" ] && echo 0.2.0\n';
+	const fakeCpm = '#!/bin/sh\n[ "$1" = "--version" ] && echo 0.3.0\n';
 	const installed = spawnSync('sh', ['-c', scriptsForTest.installRuntimeScript], {input: fakeCpm, env: {...process.env, HOME: home}, encoding: 'utf8'});
 	assert.equal(installed.status, 0, installed.stderr);
 	assert.equal(await readFile(join(home, '.local', 'bin', 'cpm'), 'utf8'), fakeCpm);

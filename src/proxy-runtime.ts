@@ -1,5 +1,5 @@
 import {spawn} from 'node:child_process';
-import {randomBytes} from 'node:crypto';
+import {createHash, randomBytes} from 'node:crypto';
 import {constants as fsConstants} from 'node:fs';
 import {access, chmod, mkdir, readFile, realpath, rm, writeFile} from 'node:fs/promises';
 import net, {type Socket} from 'node:net';
@@ -9,10 +9,14 @@ import tls from 'node:tls';
 import {domainToASCII} from 'node:url';
 import {statusSummary, type CheckItem, type CheckState} from './types.js';
 import {VERSION} from './version.js';
+import {loadCachedGeo, lookupGeoProfile, saveCachedGeo, type GeoProfile} from './geolocation.js';
 
 const DEFAULT_PORT = 17_891;
-const DEFAULT_TIMEZONE = 'America/Los_Angeles';
-const DEFAULT_LOCALE = 'en_US.UTF-8';
+const DEFAULT_TIMEZONE = 'auto';
+const DEFAULT_LOCALE = 'auto';
+const FALLBACK_TIMEZONE = 'America/Los_Angeles';
+const FALLBACK_LOCALE = 'en_US.UTF-8';
+const GEO_CACHE_AGE_MS = 6 * 60 * 60 * 1_000;
 const HTTP_OK = new Set([200, 400, 401, 403, 404, 405]);
 
 export type RuntimeConfig = {
@@ -159,12 +163,32 @@ async function httpsRequest(host: string, path: string, socket?: Socket): Promis
 		secure.once('error', error => { clearTimeout(timer); reject(error); });
 		secure.once('end', () => {
 			clearTimeout(timer);
-			const raw = Buffer.concat(chunks).toString('utf8');
-			const [head = '', ...body] = raw.split('\r\n\r\n');
+			const raw = Buffer.concat(chunks);
+			const separator = raw.indexOf('\r\n\r\n');
+			const head = raw.subarray(0, separator).toString('latin1');
+			let body = separator >= 0 ? raw.subarray(separator + 4) : Buffer.alloc(0);
+			if (/\r\ntransfer-encoding:\s*chunked/i.test(`\r\n${head}`)) body = decodeChunked(body);
 			const status = Number(head.match(/^HTTP\/\S+\s+(\d+)/)?.[1] || 0);
-			resolve({status, body: body.join('\r\n\r\n').trim()});
+			resolve({status, body: body.toString('utf8').trim()});
 		});
 	});
+}
+
+function decodeChunked(input: Buffer<ArrayBuffer>): Buffer<ArrayBuffer> {
+	const chunks: Buffer<ArrayBuffer>[] = [];
+	let offset = 0;
+	while (offset < input.length) {
+		const lineEnd = input.indexOf('\r\n', offset);
+		if (lineEnd < 0) break;
+		const size = Number.parseInt(input.subarray(offset, lineEnd).toString('ascii').split(';')[0] || '', 16);
+		if (!Number.isFinite(size) || size < 0) break;
+		offset = lineEnd + 2;
+		if (size === 0) return Buffer.concat(chunks);
+		if (offset + size > input.length) break;
+		chunks.push(input.subarray(offset, offset + size));
+		offset += size + 2;
+	}
+	return input;
 }
 
 async function httpProxyConnect(port: number, targetHost: string, targetPort: number): Promise<Socket> {
@@ -191,6 +215,53 @@ async function httpProxyConnect(port: number, targetHost: string, targetPort: nu
 
 async function bridgedHttps(port: number, host: string, path: string): Promise<HttpResult> {
 	return httpsRequest(host, path, await httpProxyConnect(port, host, 443));
+}
+
+type AutomaticResolution = {
+	config: RuntimeConfig;
+	geo?: GeoProfile;
+	error?: string;
+	cached: boolean;
+	exitIp?: string;
+};
+
+async function resolveAutomaticEnvironment(config: RuntimeConfig, force: boolean, knownExitIp?: string): Promise<AutomaticResolution> {
+	const autoTimezone = config.timezone.toLowerCase() === 'auto';
+	const autoLocale = config.locale.toLowerCase() === 'auto';
+	if (!force && !autoTimezone && !autoLocale) return {config, cached: false};
+	const fingerprint = createHash('sha256').update(`${config.proxyUrl}\0${config.httpPort}`).digest('hex');
+	try {
+		let geo = force ? undefined : await loadCachedGeo(fingerprint, GEO_CACHE_AGE_MS);
+		const cached = Boolean(geo);
+		let exitIp = knownExitIp;
+		if (!geo) {
+			if (!exitIp) {
+				const result = await bridgedHttps(config.httpPort, 'api.ipify.org', '/');
+				if (result.status !== 200 || !result.body) throw new Error(`出口 IP 查询返回 HTTP ${result.status}`);
+				exitIp = result.body;
+			}
+			geo = await lookupGeoProfile(exitIp, async (host, path) => {
+				const result = await bridgedHttps(config.httpPort, host, path);
+				if (result.status !== 200) throw new Error(`HTTP ${result.status}`);
+				try { return JSON.parse(result.body) as unknown; }
+				catch { throw new Error('返回内容不是 JSON'); }
+			});
+			await saveCachedGeo(fingerprint, geo);
+		}
+		return {
+			config: {...config, timezone: autoTimezone ? geo.timezone : config.timezone, locale: autoLocale ? geo.locale : config.locale},
+			geo,
+			cached,
+			exitIp: exitIp || geo.ip,
+		};
+	} catch (error) {
+		return {
+			config: {...config, timezone: autoTimezone ? FALLBACK_TIMEZONE : config.timezone, locale: autoLocale ? FALLBACK_LOCALE : config.locale},
+			error: (error as Error).message,
+			cached: false,
+			...(knownExitIp ? {exitIp: knownExitIp} : {}),
+		};
+	}
 }
 
 function splitHostPort(value: string, fallback: number): [string, number] {
@@ -391,21 +462,52 @@ export async function inspectProxyRuntime(): Promise<CheckItem[]> {
 		try { const socks = await socksConnect(config.proxyUrl, 'api.ipify.org', 443); socks.destroy(); rows.push(row('SOCKS5 认证', 'PASS', '通过')); }
 		catch (error) { rows.push(row('SOCKS5 认证', 'FAIL', '失败', (error as Error).message)); }
 	}
-	try { await ensureBridge(config); rows.push(row('内置 HTTP bridge', 'PASS', `127.0.0.1:${config.httpPort}`)); }
+	let bridgeReady = false;
+	try { await ensureBridge(config); bridgeReady = true; rows.push(row('内置 HTTP bridge', 'PASS', `127.0.0.1:${config.httpPort}`)); }
 	catch (error) { rows.push(row('内置 HTTP bridge', 'FAIL', '不可用', (error as Error).message)); }
-	const env = proxyEnvironment(config);
+	let exitIp = '';
+	let exitError = '';
+	if (parsed && bridgeReady) {
+		try {
+			const result = await bridgedHttps(config.httpPort, 'api.ipify.org', '/');
+			exitIp = result.status === 200 ? result.body : '';
+			if (!exitIp) exitError = `HTTP ${result.status}`;
+		} catch (error) { exitError = (error as Error).message; }
+	}
+	const resolution = bridgeReady
+		? await resolveAutomaticEnvironment(config, true, exitIp || undefined)
+		: {
+			config: {...config, timezone: config.timezone === 'auto' ? FALLBACK_TIMEZONE : config.timezone, locale: config.locale === 'auto' ? FALLBACK_LOCALE : config.locale},
+			error: 'bridge 不可用',
+			cached: false,
+		};
+	const resolved = resolution.config;
+	const env = proxyEnvironment(resolved);
 	const proxy = `http://127.0.0.1:${config.httpPort}`;
 	for (const name of ['ALL_PROXY', 'all_proxy', 'HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy'] as const) rows.push(row(name, env[name] === proxy ? 'PASS' : 'FAIL', env[name] || '<空>'));
 	for (const name of ['NO_PROXY', 'no_proxy'] as const) rows.push(row(name, env[name] === config.noProxy ? 'PASS' : 'FAIL', env[name] || '<空>'));
-	rows.push(row('TZ', env.TZ === config.timezone ? 'PASS' : 'FAIL', env.TZ || '<空>'));
+	rows.push(row('TZ', resolution.error && config.timezone === 'auto' ? 'WARN' : env.TZ === resolved.timezone ? 'PASS' : 'FAIL', env.TZ || '<空>', config.timezone === 'auto' ? '自动注入' : '手动配置'));
 	try {
 		const now = new Date();
-		const short = new Intl.DateTimeFormat('en-US', {timeZone: config.timezone, timeZoneName: 'short'}).formatToParts(now).find(part => part.type === 'timeZoneName')?.value;
-		const offset = new Intl.DateTimeFormat('en-US', {timeZone: config.timezone, timeZoneName: 'shortOffset'}).formatToParts(now).find(part => part.type === 'timeZoneName')?.value;
+		const short = new Intl.DateTimeFormat('en-US', {timeZone: resolved.timezone, timeZoneName: 'short'}).formatToParts(now).find(part => part.type === 'timeZoneName')?.value;
+		const offset = new Intl.DateTimeFormat('en-US', {timeZone: resolved.timezone, timeZoneName: 'shortOffset'}).formatToParts(now).find(part => part.type === 'timeZoneName')?.value;
 		rows.push(row('时区实际值', 'PASS', [short, offset].filter(Boolean).join(' ')));
 	} catch (error) { rows.push(row('时区实际值', 'FAIL', '无效时区', (error as Error).message)); }
-	for (const name of ['LANG', 'LC_ALL', 'LC_CTYPE', 'LC_MESSAGES'] as const) rows.push(row(name, env[name] === config.locale ? 'PASS' : 'FAIL', env[name] || '<空>'));
+	for (const name of ['LANG', 'LC_ALL', 'LC_CTYPE', 'LC_MESSAGES'] as const) rows.push(row(name, resolution.error && config.locale === 'auto' ? 'WARN' : env[name] === resolved.locale ? 'PASS' : 'FAIL', env[name] || '<空>', config.locale === 'auto' ? '自动注入' : '手动配置'));
 	rows.push(row('CLAUDE_CONFIG_DIR', config.claudeConfigDir && env.CLAUDE_CONFIG_DIR === config.claudeConfigDir ? 'PASS' : 'INFO', config.claudeConfigDir || '<Claude 默认目录>'));
+	if (resolution.geo) {
+		const geo = resolution.geo;
+		rows.push(row('地理信息 API', 'PASS', geo.source, resolution.cached ? '缓存' : '实时'));
+		rows.push(row('IP 归属国家', geo.country ? 'PASS' : 'WARN', [geo.country, geo.countryCode].filter(Boolean).join(' / ') || '<未知>'));
+		rows.push(row('州/地区', geo.region ? 'PASS' : 'WARN', geo.region || '<未知>'));
+		rows.push(row('城市', geo.city ? 'PASS' : 'WARN', geo.city || '<未知>'));
+		rows.push(row('ISP/组织', geo.isp ? 'PASS' : 'WARN', geo.isp || '<未知>'));
+		rows.push(row('ASN', geo.asn ? 'PASS' : 'INFO', geo.asn || '<未知>'));
+		rows.push(row('探测时区', geo.timezone ? 'PASS' : 'WARN', geo.timezone || '<未知>'));
+		rows.push(row('探测语言', geo.languages ? 'PASS' : 'INFO', geo.languages || '<API 未提供>', `locale=${geo.locale}`));
+	} else {
+		rows.push(row('地理信息 API', 'WARN', '探测失败', resolution.error || '没有返回数据'));
+	}
 	rows.push(row('DNS 模式', parsed?.protocol === 'socks5h:' ? 'PASS' : 'WARN', parsed?.protocol === 'socks5h:' ? 'SOCKS5H 远端解析' : '非远端解析'));
 	rows.push(row('浏览器集成', 'PASS', '--no-chrome'));
 	try {
@@ -413,14 +515,13 @@ export async function inspectProxyRuntime(): Promise<CheckItem[]> {
 		rows.push(row('开发机直连 IP', direct.status === 200 ? 'PASS' : 'WARN', direct.body || `HTTP ${direct.status}`));
 	} catch (error) { rows.push(row('开发机直连 IP', 'WARN', '获取失败', (error as Error).message)); }
 	if (parsed) {
-		try {
-			const result = await bridgedHttps(config.httpPort, 'api.ipify.org', '/');
-			const ip = result.body;
-			rows.push(row('代理出口 IP', result.status === 200 && Boolean(ip) ? 'PASS' : 'FAIL', ip || `HTTP ${result.status}`));
+		if (exitIp) {
+			const ip = exitIp;
+			rows.push(row('代理出口 IP', 'PASS', ip));
 			const endpoint = parsed.hostname;
 			const isAddress = net.isIP(endpoint) > 0;
 			rows.push(row('出口与节点 IP', !isAddress ? 'INFO' : ip === endpoint ? 'PASS' : 'WARN', !isAddress ? '节点使用域名' : ip === endpoint ? '一致' : '不一致', isAddress && ip !== endpoint ? `${endpoint} → ${ip}` : ''));
-		} catch (error) { rows.push(row('代理出口 IP', 'FAIL', '获取失败', (error as Error).message)); }
+		} else rows.push(row('代理出口 IP', 'FAIL', '获取失败', exitError || 'bridge 不可用'));
 		try {
 			const result = await bridgedHttps(config.httpPort, 'api.anthropic.com', '/v1/messages');
 			rows.push(row('Anthropic API', HTTP_OK.has(result.status) ? 'PASS' : 'FAIL', `HTTP ${result.status}`));
@@ -444,8 +545,12 @@ export async function runClaudeProxy(args: string[]): Promise<number> {
 	}
 	if (args[0] === '--stop-bridge') { await stopBridge(config.httpPort); return 0; }
 	await ensureBridge(config);
+	const resolution = await resolveAutomaticEnvironment(config, false);
+	if (resolution.error && (config.timezone === 'auto' || config.locale === 'auto')) {
+		console.error(`cpm: IP 地理信息探测失败，使用默认时区/语言：${resolution.error}`);
+	}
 	return await new Promise((resolve, reject) => {
-		const child = spawn(config.claudeBin, ['--no-chrome', ...args], {stdio: 'inherit', env: proxyEnvironment(config)});
+		const child = spawn(config.claudeBin, ['--no-chrome', ...args], {stdio: 'inherit', env: proxyEnvironment(resolution.config)});
 		child.once('error', reject);
 		child.once('exit', (code, signal) => {
 			if (signal) process.kill(process.pid, signal);
