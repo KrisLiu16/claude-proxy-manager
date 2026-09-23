@@ -164,5 +164,6 @@ else
   if [ -n "$WROTE" ]; then tick "路径" "已写进${WROTE}"; else tick "路径" "已配置过"; fi
   note "新开一个终端，或运行 . $(short "$ENV_FILE")"
 fi
-row "启动" "运行 ${BOLD}cpm${RESET}"
+row "启动" "运行 ${BOLD}cpm${RESET}，按 e 配置代理，再按 s 准备工作区"
+if [ "$(uname -s)" = Darwin ]; then note "隔离容器目前只支持 Linux 开发机"; fi
 printf '\n'

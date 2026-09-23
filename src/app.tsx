@@ -1,391 +1,223 @@
-import React, {useEffect, useMemo, useRef, useState} from 'react';
+import React, {useEffect, useState} from 'react';
 import {Box, Text, useApp, useInput} from 'ink';
 import TextInput from 'ink-text-input';
-import type {ProfileStore} from './config.js';
-import type {SecretStore} from './secrets.js';
-import type {HostProfile} from './types.js';
-import {DEFAULT_LOCALE, DEFAULT_TIMEZONE, normalizeNoProxy, parseProxySpec, statusSummary, validateHost} from './types.js';
-import type {SSHClient} from './ssh.js';
-import type {BrowserSession, OperationProgress, ProgressReporter} from './ssh.js';
+import {checkLocal, prepareLocal, readLocalSettings, saveLocalSettings, setReplaceClaude, type LocalSettings, type Progress} from './local-setup.js';
+import {findClaude} from './local-setup.js';
+import {inspectContainerPrerequisites, inspectPersistentVolumes} from './isolated-sandbox.js';
+import type {CheckItem} from './types.js';
+import {VERSION} from './version.js';
 
-type Props = {
-	initialHosts: HostProfile[];
-	store: ProfileStore;
-	secrets: SecretStore;
-	ssh: SSHClient;
-	platform?: NodeJS.Platform;
+type Initial = Awaited<ReturnType<typeof readLocalSettings>>;
+type Mode = 'home' | 'edit' | 'audit' | 'help';
+export type LaunchTarget = 'enter' | 'claude' | 'codex';
+type Snapshot = {docker: string; claude: string; volumes: string};
+type Field = 'proxySpec' | 'noProxy' | 'timezone' | 'locale' | 'httpPort';
+const fields: Field[] = ['proxySpec', 'noProxy', 'timezone', 'locale', 'httpPort'];
+const labels: Record<Field, string> = {
+	proxySpec: '代理 HOST:PORT:USER:PASSWORD',
+	noProxy: '直连白名单（域名/IP/CIDR，逗号分隔）',
+	timezone: '时区（auto 或 IANA 名称）',
+	locale: '语言（auto 或 en_US.UTF-8）',
+	httpPort: '本地 bridge 端口',
 };
 
-type FormState = {
-	name: string;
-	sshHost: string;
-	proxySpec: string;
-	proxyHost: string;
-	proxyPort: string;
-	proxyUser: string;
-	password: string;
-	noProxy: string;
-	timezone: string;
-	locale: string;
-	claudeConfigDir: string;
-	replaceClaude: boolean;
-};
-
-const fieldNames = ['name', 'sshHost', 'proxySpec', 'proxyHost', 'proxyPort', 'proxyUser', 'password', 'noProxy', 'timezone', 'locale'] as const;
-type FieldName = (typeof fieldNames)[number];
-
-const labels: Record<FieldName, string> = {
-	name: '配置名称',
-	sshHost: 'SSH alias/user@host',
-	proxySpec: '快速导入 HOST:PORT:USER:PASSWORD（可选）',
-	proxyHost: '代理主机',
-	proxyPort: '代理端口',
-	proxyUser: '代理用户',
-	password: '代理密码',
-	noProxy: 'NO_PROXY（逗号分隔）',
-	timezone: 'Claude 进程时区（auto 自动）',
-	locale: 'Claude 进程 locale（auto 自动）',
-};
-
-function emptyForm(): FormState {
-	return {
-		name: '',
-		sshHost: '',
-		proxySpec: '',
-		proxyHost: '',
-		proxyPort: '',
-		proxyUser: '',
-		password: '',
-		noProxy: '',
-		timezone: DEFAULT_TIMEZONE,
-		locale: DEFAULT_LOCALE,
-		claudeConfigDir: '',
-		replaceClaude: true,
-	};
+function color(state: CheckItem['state']): 'green' | 'red' | 'yellow' | 'cyan' | 'gray' {
+	return state === 'PASS' ? 'green' : state === 'FAIL' ? 'red' : state === 'WARN' ? 'yellow' : state === 'INFO' ? 'cyan' : 'gray';
 }
 
-function progressBar(percent: number): string {
-	const width = 24;
-	const complete = Math.round(width * percent / 100);
-	return `[${'█'.repeat(complete)}${'░'.repeat(width - complete)}]`;
+function short(value: string, max = 74): string {
+	return [...value].length > max ? `${[...value].slice(0, max - 1).join('')}…` : value;
 }
 
-export function App({initialHosts, store, secrets, ssh, platform = process.platform}: Props): React.JSX.Element {
+function bar(percent: number): string {
+	const done = Math.round(Math.max(0, Math.min(100, percent)) / 5);
+	return `${'█'.repeat(done)}${'░'.repeat(20 - done)}`;
+}
+
+export function App({initial, platform = process.platform, onLaunch}: {initial: Initial; platform?: NodeJS.Platform; onLaunch?: (target: LaunchTarget) => void}): React.JSX.Element {
 	const {exit} = useApp();
-	const [hosts, setHosts] = useState(initialHosts);
-	const [cursor, setCursor] = useState(0);
-	const [mode, setMode] = useState<'list' | 'edit' | 'browser'>('list');
-	const [form, setForm] = useState<FormState>(emptyForm);
+	const [current, setCurrent] = useState(initial);
+	const [form, setForm] = useState<LocalSettings>(initial.settings);
+	const [mode, setMode] = useState<Mode>('home');
 	const [focus, setFocus] = useState(0);
-	const [originalName, setOriginalName] = useState('');
 	const [busy, setBusy] = useState(false);
-	const [progress, setProgress] = useState<OperationProgress>();
-	const [elapsedSeconds, setElapsedSeconds] = useState(0);
-	const [status, setStatus] = useState('选择机器后按 s 一键安装和应用配置');
-	const [statusColor, setStatusColor] = useState<'white' | 'green' | 'red'>('white');
-	const [pendingDelete, setPendingDelete] = useState('');
-	const [browserSession, setBrowserSession] = useState<BrowserSession>();
-	const sessionPasswords = useRef(new Map<string, string>());
+	const [progress, setProgress] = useState<Progress>();
+	const [seconds, setSeconds] = useState(0);
+	const [message, setMessage] = useState(initial.configured ? '按 s 准备工作区，按 c 逐项检查' : '先按 e 填写代理，然后按 s 准备工作区');
+	const [messageColor, setMessageColor] = useState<'green' | 'red' | 'white'>('white');
+	const [checks, setChecks] = useState<CheckItem[]>([]);
+	const [rowIndex, setRowIndex] = useState(0);
+	const [snapshot, setSnapshot] = useState<Snapshot>({docker: '读取中', claude: '读取中', volumes: '读取中'});
+	const [prepared, setPrepared] = useState(false);
 
-	const selected = hosts[cursor];
-	const orderedHosts = useMemo(() => hosts, [hosts]);
+	async function refresh(): Promise<void> {
+		const [next, claude, docker] = await Promise.all([readLocalSettings(), findClaude(), inspectContainerPrerequisites()]);
+		const volumes = docker.some(item => item.state === 'FAIL') ? [] : await inspectPersistentVolumes();
+		setCurrent(next);
+		setSnapshot({
+			claude: claude ? '已安装' : '未安装，准备时自动下载',
+			docker: docker.some(item => item.state === 'FAIL') ? '未就绪' : '可用 · seccomp · AppArmor',
+			volumes: volumes[0]?.state === 'PASS' ? '已登记并保留' : volumes[0]?.state === 'FAIL' ? '异常，查看检查结果' : '尚未创建',
+		});
+	}
 
+	useEffect(() => { void refresh().catch(() => {}); }, []);
 	useEffect(() => {
-		if (!busy) { setElapsedSeconds(0); return; }
-		const startedAt = Date.now();
-		const timer = setInterval(() => setElapsedSeconds(Math.floor((Date.now() - startedAt) / 1_000)), 1_000);
+		if (!busy) { setSeconds(0); return; }
+		const started = Date.now();
+		const timer = setInterval(() => setSeconds(Math.floor((Date.now() - started) / 1000)), 1000);
 		return () => clearInterval(timer);
 	}, [busy]);
 
-	function passwordFor(name: string): string | undefined {
-		const inMemory = sessionPasswords.current.get(name);
-		if (inMemory) return inMemory;
-		try {
-			const password = secrets.get(name);
-			if (password) sessionPasswords.current.set(name, password);
-			return password;
-		} catch {
-			return undefined;
-		}
-	}
-
-	function openEditor(host?: HostProfile): void {
-		setOriginalName(host?.name ?? '');
-		setForm(host ? {
-			name: host.name,
-			sshHost: host.sshHost,
-			proxySpec: '',
-			proxyHost: host.proxyHost,
-			proxyPort: host.proxyPort ? String(host.proxyPort) : '',
-			proxyUser: host.proxyUser,
-			password: passwordFor(host.name) ?? '',
-			noProxy: host.noProxy.join(','),
-			timezone: host.timezone,
-			locale: host.locale,
-			claudeConfigDir: host.claudeConfigDir,
-			replaceClaude: host.replaceClaude,
-		} : emptyForm());
-		setFocus(0);
-		setMode('edit');
-		setPendingDelete('');
-		setStatus('填写配置后按 Ctrl+S 保存');
-		setStatusColor('white');
-	}
-
-	async function saveEditor(): Promise<void> {
-		let proxyHost = form.proxyHost.trim();
-		let proxyPort = Number(form.proxyPort);
-		let proxyUser = form.proxyUser.trim();
-		let password = form.password;
-		if (form.proxySpec.trim()) {
-			try {
-				const parsed = parseProxySpec(form.proxySpec);
-				proxyHost = parsed.host;
-				proxyPort = parsed.port;
-				proxyUser = parsed.user;
-				password = parsed.password;
-			} catch (error) {
-				setStatus((error as Error).message);
-				setStatusColor('red');
-				return;
-			}
-		}
-		const host: HostProfile = {
-			name: form.name.trim(),
-			sshHost: form.sshHost.trim(),
-			proxyHost,
-			proxyPort,
-			proxyUser,
-			noProxy: normalizeNoProxy(form.noProxy),
-			replaceClaude: form.replaceClaude,
-			timezone: form.timezone.trim(),
-			locale: form.locale.trim(),
-			claudeConfigDir: form.claudeConfigDir.trim(),
-		};
-		try {
-			validateHost(host, true);
-			if (hosts.some(item => item.name === host.name && item.name !== originalName)) {
-				throw new Error('配置名称已存在');
-			}
-			const next = originalName
-				? hosts.map(item => item.name === originalName ? host : item)
-				: [...hosts, host];
-			next.sort((left, right) => left.name.localeCompare(right.name));
-			await store.save(next);
-			let warning = '';
-			if (password) {
-				sessionPasswords.current.set(host.name, password);
-				try {
-					secrets.set(host.name, password);
-				} catch {
-					warning = '；本地机密文件写入失败，密码仅保留到本次退出';
-				}
-			}
-			if (originalName && originalName !== host.name) {
-				try { secrets.delete(originalName); } catch {}
-				sessionPasswords.current.delete(originalName);
-			}
-			setHosts(next);
-			setCursor(Math.max(0, next.findIndex(item => item.name === host.name)));
-			setMode('list');
-			setStatus(`配置已保存${warning}；按 s 应用到远端`);
-			setStatusColor('green');
-		} catch (error) {
-			setStatus((error as Error).message);
-			setStatusColor('red');
-		}
-	}
-
-	async function runOperation(label: string, operation: (reporter: ProgressReporter) => Promise<string>): Promise<void> {
+	async function operation(label: string, action: (report: (progress: Progress) => void) => Promise<string>): Promise<void> {
 		setBusy(true);
-		setStatus(label);
+		setMessage(label);
+		setMessageColor('white');
 		setProgress({percent: 0, label});
-		setStatusColor('white');
-		const reporter: ProgressReporter = update => {
-			setProgress(update);
-			setStatus(update.label);
-		};
 		try {
-			setStatus(await operation(reporter));
-			setStatusColor('green');
+			const result = await action(update => { setProgress(update); setMessage(update.label); });
+			setMessage(result);
+			setMessageColor('green');
+			await refresh();
 		} catch (error) {
-			setStatus((error as Error).message);
-			setStatusColor('red');
+			setMessage((error as Error).message);
+			setMessageColor('red');
 		} finally {
 			setBusy(false);
 			setProgress(undefined);
 		}
 	}
 
-	async function beginBrowser(host: HostProfile, password: string): Promise<void> {
-		await runOperation(`正在准备 ${host.name} 的安全浏览器`, async reporter => {
-			const session = await ssh.openBrowser(host, password, reporter);
-			setBrowserSession(session);
-			setMode('browser');
-			return `安全浏览器已打开，使用 Chrome ${session.profileSource}`;
+	function openEditor(): void {
+		setForm({...current.settings, proxySpec: ''});
+		setFocus(0);
+		setMode('edit');
+		setMessage('保存后会更新当前开发机的代理与默认路由');
+		setMessageColor('white');
+	}
+
+	async function save(): Promise<void> {
+		await operation('保存本机配置', async () => {
+			await saveLocalSettings(form);
+			setMode('home');
+			setPrepared(false);
+			return '配置已保存；按 s 准备或更新容器镜像';
 		});
 	}
 
-	async function closeBrowser(): Promise<void> {
-		const session = browserSession;
-		setBrowserSession(undefined);
-		setMode('list');
-		setBusy(true);
-		setStatus('正在关闭安全浏览器并恢复语言与时区');
-		setStatusColor('white');
-		try {
-			await session?.close();
-			setStatus('安全浏览器已关闭，语言与时区已恢复');
-			setStatusColor('green');
-		} catch (error) {
-			setStatus((error as Error).message);
-			setStatusColor('red');
-		} finally {
-			setBusy(false);
-		}
-	}
-
 	useInput((input, key) => {
-		if (mode === 'browser' && (key.escape || key.return || (key.ctrl && input === 'c'))) {
-			void closeBrowser();
-			return;
-		}
 		if (busy) return;
 		if (mode === 'edit') {
-			if (key.escape) {
-				setMode('list');
-				setStatus('已取消编辑');
-				return;
-			}
-			if (key.tab || key.downArrow) {
-				setFocus(value => (value + 1) % fieldNames.length);
-				return;
-			}
-			if (key.shift && key.tab || key.upArrow) {
-				setFocus(value => (value - 1 + fieldNames.length) % fieldNames.length);
-				return;
-			}
-			if (key.ctrl && input === 't') {
-				setForm(value => ({...value, replaceClaude: !value.replaceClaude}));
-				return;
-			}
-			if (key.ctrl && input === 's') {
-				void saveEditor();
-			}
+			if (key.escape) { setMode('home'); setMessage('已取消编辑'); return; }
+			if (key.tab || key.downArrow) { setFocus(value => (value + 1) % fields.length); return; }
+			if (key.upArrow || key.shift && key.tab) { setFocus(value => (value - 1 + fields.length) % fields.length); return; }
+			if (key.ctrl && input === 't') { setForm(value => ({...value, replaceClaude: !value.replaceClaude})); return; }
+			if (key.ctrl && input === 's') { void save(); return; }
 			return;
 		}
-
-		if (input !== 'd') setPendingDelete('');
-		if (input === 'q' || (key.ctrl && input === 'c')) exit();
-		else if (key.upArrow || input === 'k') setCursor(value => Math.max(0, value - 1));
-		else if (key.downArrow || input === 'j') setCursor(value => Math.min(hosts.length - 1, value + 1));
-		else if (input === 'a') openEditor();
-		else if ((input === 'e' || key.return) && selected) openEditor(selected);
-		else if (input === 'c' && selected) {
-			void runOperation(`正在检查 ${selected.name}`, async reporter => {
-				const result = await ssh.check(selected, reporter);
-				return `检查完成\n${statusSummary(result)}`;
-			});
-		} else if (input === 's' && selected) {
-			const password = passwordFor(selected.name);
-			if (!password) {
-				setStatus('没有可用的代理密码；按 e 编辑并输入密码');
-				setStatusColor('red');
-				return;
-			}
-			void runOperation(`正在安装并配置 ${selected.name}`, async reporter => {
-				const result = await ssh.setup(selected, password, reporter);
-				return `远端配置完成\n${statusSummary(result)}`;
-			});
-		} else if (input === 'g' && selected && platform === 'darwin') {
-			const password = passwordFor(selected.name);
-			if (!password) {
-				setStatus('没有可用的代理密码；按 e 编辑并输入密码');
-				setStatusColor('red');
-				return;
-			}
-			void beginBrowser(selected, password);
-		} else if (input === 't' && selected) {
-			const nextHost = {...selected, replaceClaude: !selected.replaceClaude};
-			void runOperation('正在切换默认 claude', async reporter => {
-				reporter({percent: 20, label: '正在更新远端 shell 配置'});
-				await ssh.setReplaceClaude(nextHost, nextHost.replaceClaude);
-				reporter({percent: 75, label: '正在保存本机机器配置'});
-				const next = hosts.map(item => item.name === nextHost.name ? nextHost : item);
-				await store.save(next);
-				setHosts(next);
-				return '默认替换已更新；重新登录 shell 后生效';
-			});
-		} else if (input === 'd' && selected) {
-			if (pendingDelete !== selected.name) {
-				setPendingDelete(selected.name);
-				setStatus(`再次按 d 删除 ${selected.name} 的本地配置；远端文件不会删除`);
-				setStatusColor('red');
-				return;
-			}
-			void (async () => {
-				const next = hosts.filter(item => item.name !== selected.name);
-				await store.save(next);
-				try { secrets.delete(selected.name); } catch {}
-				sessionPasswords.current.delete(selected.name);
-				setHosts(next);
-				setCursor(value => Math.max(0, Math.min(value, next.length - 1)));
-				setPendingDelete('');
-				setStatus('本地配置已删除；远端文件保持不变');
-				setStatusColor('green');
-			})();
+		if (mode === 'audit') {
+			if (key.escape || input === 'b') { setMode('home'); return; }
+			if (key.upArrow || input === 'k') { setRowIndex(value => Math.max(0, value - 1)); return; }
+			if (key.downArrow || input === 'j') { setRowIndex(value => Math.min(checks.length - 1, value + 1)); return; }
+			if (input === 'c' || input === 'r') { void operation('重新检查', async () => { setChecks(await checkLocal()); setRowIndex(0); return '逐项检查完成'; }); return; }
 		}
+		if (mode === 'help' && (key.escape || input === 'b')) { setMode('home'); return; }
+		if (input === 'q' || key.ctrl && input === 'c') { exit(); return; }
+		if (mode !== 'home') return;
+		if (input === 'e') openEditor();
+		else if (input === 's') void operation('准备本机隔离工作区', async report => {
+			const image = await prepareLocal(report);
+			setPrepared(true);
+			return `工作区已就绪 · ${image}`;
+		});
+		else if (input === 'c') void operation('逐项检查代理与隔离环境', async () => {
+			setChecks(await checkLocal());
+			setRowIndex(0);
+			setMode('audit');
+			return '逐项检查完成；↑/↓ 查看全部结果';
+		});
+		else if (input === 't') void operation('切换默认路由', async () => {
+			const enabled = !current.settings.replaceClaude;
+			await setReplaceClaude(enabled);
+			return `claude 默认路由已${enabled ? '开启' : '关闭'}；新 shell 生效`;
+		});
+		else if (input === 'r') void operation('刷新本机状态', async () => '状态已刷新');
+		else if (input === '1' || input === '2' || input === '3') {
+			if (!current.configured) { setMessage('先按 e 填写代理并保存'); setMessageColor('red'); return; }
+			onLaunch?.(input === '1' ? 'enter' : input === '2' ? 'claude' : 'codex');
+			exit();
+		}
+		else if (input === 'h' || input === '?') setMode('help');
 	});
 
-	if (mode === 'browser') {
-		return <Box flexDirection="column">
-			<Text bold color="cyan">CPM 安全浏览器</Text>
-			<Text color="green">✓ Chrome 已命中 CPM 本机探针，并通过所配置的 SOCKS5 建立了 HTTPS 隧道。</Text>
-			<Text>已打开 IP 检测页；整个 Chrome 实例使用所选机器的代理、语言和时区。</Text>
-			<Text dimColor>Cookie 与站点状态来自原 Profile；扩展、旧缓存、QUIC 和非代理 UDP 在本次会话中禁用。</Text>
-			<Box borderStyle="round" borderColor={statusColor} paddingX={1} marginTop={1}>
-				<Text color={statusColor}>{status}</Text>
-			</Box>
-			<Box marginTop={1}><Text dimColor>回到此处按 Esc 或 Enter 关闭浏览器并恢复语言与时区</Text></Box>
-		</Box>;
-	}
-
-	if (mode === 'edit') {
-		return <Box flexDirection="column">
-			<Text bold color="cyan">编辑机器配置</Text>
-			<Text dimColor>密码保存在独立的 0600 机密文件中，不写入主机配置</Text>
-			<Box flexDirection="column" marginTop={1}>
-				{fieldNames.map((name, index) => <Box key={name}>
-					<Text color={focus === index ? 'cyan' : 'white'}>{focus === index ? '> ' : '  '}{labels[name]}: </Text>
-					<TextInput
-						value={form[name]}
-						onChange={value => setForm(current => ({...current, [name]: value}))}
-						onSubmit={() => setFocus(value => (value + 1) % fieldNames.length)}
-						focus={focus === index}
-						{...(name === 'password' || name === 'proxySpec' ? {mask: '*'} : {})}
-					/>
-				</Box>)}
-			</Box>
-			<Box marginTop={1}><Text>Ctrl+T 默认将 claude 路由到 cpm proxy: <Text color={form.replaceClaude ? 'green' : 'yellow'}>{form.replaceClaude ? '开启' : '关闭'}</Text></Text></Box>
-			<Box marginTop={1}><Text color={statusColor}>{status}</Text></Box>
-			<Box marginTop={1}><Text dimColor>Tab/Shift+Tab 切换字段  Ctrl+T 开关替换  Ctrl+S 保存  Esc 取消</Text></Box>
-		</Box>;
-	}
+	const counts = {pass: checks.filter(row => row.state === 'PASS').length, fail: checks.filter(row => row.state === 'FAIL').length, warn: checks.filter(row => row.state === 'WARN').length};
+	const pageSize = Math.max(6, Math.min(14, (process.stdout.rows || 25) - 12));
+	const first = Math.max(0, Math.min(rowIndex - Math.floor(pageSize / 2), Math.max(0, checks.length - pageSize)));
+	const currentRow = checks[rowIndex];
+	const rowValueWidth = Math.max(12, Math.min(52, (process.stdout.columns || 80) - 44));
 
 	return <Box flexDirection="column">
-		<Text bold color="cyan">CPM</Text>
-		<Text dimColor>每台开发机独立配置；cpm 通过 SSH 分发自身并运行内置代理</Text>
-		<Box flexDirection="column" marginTop={1}>
-			{orderedHosts.length === 0 && <Text>  暂无机器，按 a 添加</Text>}
-			{orderedHosts.map((host, index) => <Text key={host.name} inverse={index === cursor}>
-				{index === cursor ? '>' : ' '} {host.name.padEnd(16)} {host.sshHost.padEnd(24)} proxy={host.proxyHost}:{host.proxyPort} whitelist={host.noProxy.length} claude→proxy={host.replaceClaude ? 'on' : 'off'}
-			</Text>)}
+		<Box><Text bold color="cyan">CPM</Text><Text dimColor>  {VERSION}  /  当前开发机  /  {platform === 'linux' ? 'Linux' : `${platform} · 隔离容器不可用`}</Text></Box>
+		{mode === 'home' && <>
+			<Box borderStyle="round" borderColor="cyan" flexDirection="column" paddingX={1} marginTop={1}>
+				<Text bold>配置与准备</Text>
+				<Text>代理出口节点  <Text color={current.configured ? 'green' : 'yellow'}>{short(current.endpoint, 36)}</Text>  ·  密码仅存在本机 0600 配置</Text>
+				<Text>直连白名单    {short(current.settings.noProxy || '无；只允许经代理访问', 56)}</Text>
+				<Text>时区 / 语言   {current.settings.timezone} / {current.settings.locale}  ·  bridge {current.settings.httpPort}</Text>
+				<Text>Claude        {snapshot.claude}  ·  默认路由 <Text color={current.settings.replaceClaude ? 'green' : 'yellow'}>{current.settings.replaceClaude ? '开启' : '关闭'}</Text></Text>
+				<Text>Docker        {snapshot.docker}</Text>
+			</Box>
+			<Box borderStyle="round" borderColor="blue" flexDirection="column" paddingX={1} marginTop={1}>
+				<Text bold>共享工作区  <Text color={prepared ? 'green' : 'yellow'}>{prepared ? '本次已准备' : snapshot.volumes}</Text></Text>
+				<Text>/home/node   持久卷 · CLI 登录、用户工具与配置</Text>
+				<Text>/workspace  持久卷 · 仓库、代码与虚拟环境</Text>
+				<Text>每条命令启动新容器；后台进程、/tmp 与根文件系统不会延续。</Text>
+				<Text dimColor>宿主 HOME/项目不挂载；容器无直接外网，网络经受控 sidecar。</Text>
+			</Box>
+			<Box marginTop={1}><Text dimColor>流程  e 编辑代理  →  s 准备镜像  →  c 逐项检查  →  1/2/3 开始工作</Text></Box>
+			<Box><Text>1 进入  2 Claude  3 Codex  e 编辑  s 准备  c 检查  t 路由  h 帮助  q 退出</Text></Box>
+		</>}
+		{mode === 'edit' && <>
+			<Box marginTop={1}><Text bold color="cyan">编辑当前开发机</Text></Box>
+			<Text dimColor>已保存代理：{current.endpoint}。密码输入框留空表示沿用原代理；新配置需填完整四段。</Text>
+			<Box flexDirection="column" marginTop={1}>
+				{fields.map((field, index) => <Box key={field}>
+					<Text color={focus === index ? 'cyan' : 'gray'}>{focus === index ? '❯ ' : '  '}{labels[field]}: </Text>
+					<TextInput value={form[field]} onChange={value => setForm(valueForm => ({...valueForm, [field]: value}))}
+						onSubmit={() => setFocus(value => (value + 1) % fields.length)} focus={focus === index}
+						{...(field === 'proxySpec' ? {mask: '*'} : {})}/>
+				</Box>)}
+			</Box>
+			<Box marginTop={1}><Text>Ctrl+T  claude 默认进入 CPM：<Text color={form.replaceClaude ? 'green' : 'yellow'}>{form.replaceClaude ? '开启' : '关闭'}</Text></Text></Box>
+			<Text dimColor>白名单示例：naiveai-dev.com,.naiveai-dev.com,10.0.0.0/8</Text>
+			<Text dimColor>Tab/↑/↓ 切换  Ctrl+S 保存  Esc 取消</Text>
+		</>}
+		{mode === 'audit' && <>
+			<Box marginTop={1}><Text bold>逐项检查  </Text><Text color="green">{counts.pass} OK  </Text><Text color="yellow">{counts.warn} WARN  </Text><Text color="red">{counts.fail} FAIL</Text></Box>
+			<Box flexDirection="column" borderStyle="round" borderColor={counts.fail ? 'red' : 'green'} paddingX={1}>
+				{checks.slice(first, first + pageSize).map((row, offset) => <Text key={`${first + offset}-${row.name}`} color={rowIndex === first + offset ? 'white' : color(row.state)} inverse={rowIndex === first + offset}>
+					{rowIndex === first + offset ? '❯' : ' '} {row.state.padEnd(4)}  {short(row.name, 24).padEnd(24)} {short(row.value, rowValueWidth)}
+				</Text>)}
+			</Box>
+			<Text dimColor>{checks.length ? `${rowIndex + 1}/${checks.length}` : '无检查项'}  ↑/↓ 逐项查看  c 重查  Esc 返回</Text>
+			{currentRow && <Text>详情：{currentRow.detail || currentRow.value}</Text>}
+		</>}
+		{mode === 'help' && <>
+			<Box marginTop={1}><Text bold color="cyan">使用方法</Text></Box>
+			<Text>cpm               打开此面板，设置本机代理、白名单和路由</Text>
+			<Text>cpm setup         安装缺失的 Claude，准备 Docker、镜像与持久卷</Text>
+			<Text>cpm check         检查配置、代理出口、时区、Docker 和持久卷</Text>
+			<Text>cpm enter         在共享 /workspace 中打开交互式 bash</Text>
+			<Text>cpm exec -- git status   在共享 /workspace 执行单条命令</Text>
+			<Text>cpm proxy         启动 Claude；cpm proxy codex 启动 Codex</Text>
+			<Text>TUI 快捷键 1 / 2 / 3 可直接进入、启动 Claude 或 Codex</Text>
+			<Text>cpm sandbox -- python3 -V   在同一工作区运行其他程序</Text>
+			<Box marginTop={1}><Text dimColor>HOME 和 /workspace 持久；每条命令是新容器，后台进程不会延续。</Text></Box>
+			<Text dimColor>仅 Linux 支持隔离容器。容器隔离仍依赖宿主内核和 Docker 安全性。</Text>
+			<Text dimColor>Esc 返回  q 退出；完整帮助运行 cpm help。</Text>
+		</>}
+		<Box borderStyle="round" borderColor={messageColor} paddingX={1} marginTop={1}>
+			<Text color={messageColor}>{busy && progress ? `${bar(progress.percent)} ${String(progress.percent).padStart(3)}%  ${message}  ${seconds}s` : message}</Text>
 		</Box>
-		<Box borderStyle="round" borderColor={statusColor} paddingX={1} marginTop={1}>
-			<Text color={statusColor}>{busy && progress
-				? `… ${progressBar(progress.percent)} ${String(progress.percent).padStart(3)}%  ${status}\n  已用 ${elapsedSeconds}s`
-				: status}</Text>
-		</Box>
-		<Box marginTop={1}><Text dimColor>↑/↓ 选择  a 添加  e 编辑  c 逐项检查  s 一键设置{platform === 'darwin' ? '  g 安全浏览器' : ''}  t 切换默认替换  d 删除  q 退出</Text></Box>
 	</Box>;
 }

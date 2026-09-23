@@ -12,7 +12,7 @@ test('parseProxySpec preserves colons inside the password', () => {
 });
 
 test('parseProxySpec rejects malformed values', () => {
-	for (const value of ['', 'host:port:user:pass', 'host:70000:user:pass', 'host:80:user']) {
+	for (const value of ['', 'host:port:user:pass', 'host:70000:user:pass', 'host:80:user', 'host@evil:80:user:pass']) {
 		assert.throws(() => parseProxySpec(value));
 	}
 });
@@ -24,4 +24,3 @@ test('normalizeNoProxy trims and deduplicates entries', () => {
 		'10.0.0.1',
 	]);
 });
-

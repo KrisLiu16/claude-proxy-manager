@@ -38,13 +38,13 @@ function selfBinary(): string {
 
 type CommandResult = {code: number; stdout: string; stderr: string};
 
-async function command(program: string, args: string[], options: {cwd?: string; inherit?: boolean} = {}): Promise<CommandResult> {
+async function command(program: string, args: string[], options: {cwd?: string; inherit?: boolean; onOutput?: ((line: string) => void) | undefined} = {}): Promise<CommandResult> {
 	return await new Promise((resolve, reject) => {
 		const child = spawn(program, args, {cwd: options.cwd, stdio: options.inherit ? 'inherit' : ['ignore', 'pipe', 'pipe']});
 		const out: Buffer[] = [];
 		const err: Buffer[] = [];
-		child.stdout?.on('data', chunk => out.push(Buffer.from(chunk)));
-		child.stderr?.on('data', chunk => err.push(Buffer.from(chunk)));
+		child.stdout?.on('data', chunk => { out.push(Buffer.from(chunk)); options.onOutput?.(Buffer.from(chunk).toString('utf8').trim().split('\n').at(-1) || ''); });
+		child.stderr?.on('data', chunk => { err.push(Buffer.from(chunk)); options.onOutput?.(Buffer.from(chunk).toString('utf8').trim().split('\n').at(-1) || ''); });
 		child.once('error', reject);
 		child.once('exit', code => resolve({code: code ?? 1, stdout: Buffer.concat(out).toString('utf8'), stderr: Buffer.concat(err).toString('utf8')}));
 	});
@@ -52,7 +52,7 @@ async function command(program: string, args: string[], options: {cwd?: string; 
 
 let dockerAccess: 'direct' | 'sudo' | undefined;
 
-async function docker(args: string[], options: {cwd?: string; inherit?: boolean} = {}): Promise<CommandResult> {
+async function docker(args: string[], options: {cwd?: string; inherit?: boolean; onOutput?: ((line: string) => void) | undefined} = {}): Promise<CommandResult> {
 	if (!dockerAccess) {
 		const probe = ['version', '--format', '{{.Server.Version}}'];
 		const direct = await command('docker', probe).catch(error => ({code: 1, stdout: '', stderr: (error as Error).message}));
@@ -86,7 +86,7 @@ export async function inspectContainerPrerequisites(): Promise<CheckItem[]> {
 	];
 }
 
-export async function prepareDockerEngine(): Promise<void> {
+export async function prepareDockerEngine(onOutput?: (line: string) => void): Promise<void> {
 	if (process.platform !== 'linux') throw new Error('独立容器目前只支持 Linux 开发机');
 	if (!(await inspectContainerPrerequisites()).some(item => item.name === 'Docker 服务' && item.state === 'FAIL')) return;
 	const release = await readFile('/etc/os-release', 'utf8');
@@ -95,11 +95,11 @@ export async function prepareDockerEngine(): Promise<void> {
 	if (executable.code !== 0) {
 		console.error('CPM：正在通过系统 apt 安装 Docker Engine');
 		for (const args of [['apt-get', 'update'], ['apt-get', 'install', '-y', 'docker.io']]) {
-			const result = await command('sudo', ['-n', ...args], {inherit: true});
+			const result = await command('sudo', ['-n', ...args], {inherit: !onOutput, onOutput});
 			if (result.code !== 0) throw new Error(`Docker 安装失败：${args.join(' ')}`);
 		}
 	}
-	const started = await command('sudo', ['-n', 'systemctl', 'start', 'docker'], {inherit: true});
+	const started = await command('sudo', ['-n', 'systemctl', 'start', 'docker'], {inherit: !onOutput, onOutput});
 	if (started.code !== 0) throw new Error('Docker 已安装但服务启动失败');
 	dockerAccess = undefined;
 	const checks = await inspectContainerPrerequisites();
@@ -118,7 +118,7 @@ function volumeId(): string {
 }
 
 type VolumeNames = {version: 1; id: string; home: string; workspace: string};
-type VolumeRecord = VolumeNames & {homeCreatedAt: string; workspaceCreatedAt: string};
+export type VolumeRecord = VolumeNames & {homeCreatedAt: string; workspaceCreatedAt: string};
 
 function volumeNames(id: string): VolumeNames {
 	return {version: 1, id, home: `cpm-home-${id}`, workspace: `cpm-workspace-${id}`};
@@ -137,6 +137,31 @@ export function volumeAction(recorded: boolean, homeExists: boolean, workspaceEx
 export function verifyVolumeIdentity(recorded: Pick<VolumeRecord, 'homeCreatedAt' | 'workspaceCreatedAt'>, actual: Pick<VolumeRecord, 'homeCreatedAt' | 'workspaceCreatedAt'>): void {
 	if (recorded.homeCreatedAt !== actual.homeCreatedAt || recorded.workspaceCreatedAt !== actual.workspaceCreatedAt) {
 		throw new Error('CPM 持久卷已被替换；为避免误用空环境，已停止启动');
+	}
+}
+
+export async function inspectPersistentVolumes(): Promise<CheckItem[]> {
+	const expected = volumeNames(volumeId());
+	let stored: VolumeRecord | undefined;
+	try { stored = JSON.parse(await readFile(volumeRecordPath(), 'utf8')) as VolumeRecord; }
+	catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return [{name: '持久卷记录', state: 'FAIL', value: (error as Error).message}];
+	}
+	if (stored && (stored.version !== 1 || stored.id !== expected.id || stored.home !== expected.home || stored.workspace !== expected.workspace || !stored.homeCreatedAt || !stored.workspaceCreatedAt)) {
+		return [{name: '持久卷记录', state: 'FAIL', value: '与当前用户不一致'}];
+	}
+	try {
+		const [home, workspace] = await Promise.all([
+			docker(['volume', 'inspect', expected.home, '--format', '{{.CreatedAt}}']),
+			docker(['volume', 'inspect', expected.workspace, '--format', '{{.CreatedAt}}']),
+		]);
+		const action = volumeAction(Boolean(stored), home.code === 0, workspace.code === 0);
+		if (action === 'create') return [{name: '持久工作区', state: 'INFO', value: '首次准备时创建', detail: `${expected.home}, ${expected.workspace}`}];
+		if (action === 'adopt') return [{name: '持久工作区', state: 'WARN', value: '发现已有卷，首次准备时登记', detail: `${expected.home}, ${expected.workspace}`}];
+		verifyVolumeIdentity(stored!, {homeCreatedAt: home.stdout.trim(), workspaceCreatedAt: workspace.stdout.trim()});
+		return [{name: '持久工作区', state: 'PASS', value: '已保存', detail: `${expected.home}, ${expected.workspace}`}];
+	} catch (error) {
+		return [{name: '持久工作区', state: 'FAIL', value: (error as Error).message}];
 	}
 }
 
@@ -179,7 +204,7 @@ export async function ensurePersistentVolumes(): Promise<VolumeRecord> {
 	return record;
 }
 
-export async function ensureContainerImage(config: RuntimeConfig): Promise<string> {
+export async function ensureContainerImage(config: RuntimeConfig, onOutput?: (line: string) => void): Promise<string> {
 	validatedRegion(config);
 	const checks = await inspectContainerPrerequisites();
 	const failed = checks.find(item => item.state === 'FAIL');
@@ -202,14 +227,14 @@ export async function ensureContainerImage(config: RuntimeConfig): Promise<strin
 		await copyFile(binary, join(folder, 'cpm'));
 		await copyFile(config.claudeBin, join(folder, 'claude'));
 		const proxy = `http://127.0.0.1:${config.httpPort}`;
-		console.error('CPM：首次构建独立开发容器，安装 Git、Python 和系统工具');
+		if (!onOutput) console.error('CPM：首次构建独立开发容器，安装 Git、Python 和系统工具');
 		const built = await docker([
 			'build', '--network=host', '--pull=false', '-t', image,
 			'--build-arg', `CPM_TZ=${config.timezone}`, '--build-arg', `CPM_LOCALE=${config.locale}`,
 			'--build-arg', `CPM_UID=${uid}`, '--build-arg', `CPM_GID=${gid}`,
 			'--build-arg', `http_proxy=${proxy}`, '--build-arg', `https_proxy=${proxy}`,
 			folder,
-		], {inherit: true});
+		], {inherit: !onOutput, onOutput});
 		if (built.code !== 0) throw new Error(`独立容器构建失败，退出码 ${built.code}`);
 		return image;
 	} finally { await rm(folder, {recursive: true, force: true}); }

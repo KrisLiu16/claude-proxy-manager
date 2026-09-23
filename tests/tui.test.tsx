@@ -3,42 +3,17 @@ import test from 'node:test';
 import React from 'react';
 import {renderToString} from 'ink';
 import {App} from '../src/app.js';
-import {ProfileStore} from '../src/config.js';
-import {SecretStore} from '../src/secrets.js';
-import {SSHClient} from '../src/ssh.js';
 
-test('TUI host list renders without a terminal', () => {
-	const output = renderToString(<App
-		initialHosts={[{
-			name: 'dev',
-			sshHost: 'cpu',
-			proxyHost: 'proxy.example',
-			proxyPort: 8022,
-			proxyUser: 'alice',
-			noProxy: ['.internal'],
-			replaceClaude: true,
-			timezone: 'America/Los_Angeles',
-			locale: 'en_US.UTF-8',
-			claudeConfigDir: '',
-		}]}
-		store={new ProfileStore('/tmp/not-used-cpm-test.json')}
-		secrets={new SecretStore()}
-		ssh={new SSHClient()}
-	/>);
-	assert.match(output, /^CPM/m);
-	assert.match(output, /dev/);
-	assert.match(output, /claude→proxy=on/);
-	assert.doesNotMatch(output, /i 安装 Claude/);
-});
-
-test('TUI shows only the secure browser shortcut on macOS', () => {
-	const output = renderToString(<App
-		initialHosts={[]}
-		store={new ProfileStore('/tmp/not-used-cpm-test.json')}
-		secrets={new SecretStore()}
-		ssh={new SSHClient()}
-		platform="darwin"
-	/>);
-	assert.doesNotMatch(output, /l 登录远端 Claude/);
-	assert.match(output, /g\s+安全浏览器/);
+test('TUI explains persistent volumes and fresh containers on the current machine', () => {
+	const output = renderToString(<App initial={{
+		configured: true,
+		endpoint: 'proxy.example:8022',
+		settings: {proxySpec: '', noProxy: 'naiveai-dev.com,.naiveai-dev.com', timezone: 'auto', locale: 'auto', httpPort: '17891', replaceClaude: true},
+	}}/>);
+	assert.match(output, /当前开发机/);
+	assert.match(output, /proxy\.example:8022/);
+	assert.match(output, /\/home\/node/);
+	assert.match(output, /\/workspace/);
+	assert.match(output, /每条命令启动新容器/);
+	assert.doesNotMatch(output, /SSH|选择机器|远端/);
 });

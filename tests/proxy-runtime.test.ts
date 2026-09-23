@@ -5,7 +5,7 @@ import net from 'node:net';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import test from 'node:test';
-import {proxyEnvironment, readRuntimeConfig, resolveAutomaticEnvironment, runProxyPreflight, socksConnect, startEphemeralBridge, type RuntimeConfig} from '../src/proxy-runtime.js';
+import {proxyEnvironment, readRuntimeConfig, resolveAutomaticEnvironment, runProxyPreflight, socksConnect, type RuntimeConfig} from '../src/proxy-runtime.js';
 import {saveCachedGeo, type GeoProfile} from '../src/geolocation.js';
 
 test('integrated SOCKS5 client authenticates and requests remote DNS target', async () => {
@@ -46,58 +46,6 @@ test('integrated SOCKS5 client authenticates and requests remote DNS target', as
 	assert.equal((await echoed).toString(), 'ping');
 	socket.destroy();
 	await new Promise<void>(resolve => server.close(() => resolve()));
-});
-
-test('ephemeral browser bridge listens on loopback and forwards CONNECT through SOCKS5', async () => {
-	let requested = '';
-	const upstream = net.createServer(socket => {
-		let stage = 0;
-		socket.on('data', data => {
-			if (stage === 0) {
-				stage = 1;
-				socket.write(Buffer.from([5, 2]));
-			} else if (stage === 1) {
-				stage = 2;
-				socket.write(Buffer.from([1, 0]));
-			} else if (stage === 2) {
-				const length = data[4]!;
-				requested = data.subarray(5, 5 + length).toString();
-				stage = 3;
-				socket.write(Buffer.from([5, 0, 0, 1, 127, 0, 0, 1, 0, 80]));
-			}
-		});
-	});
-	await new Promise<void>(resolve => upstream.listen(0, '127.0.0.1', resolve));
-	const upstreamAddress = upstream.address();
-	assert.ok(upstreamAddress && typeof upstreamAddress !== 'string');
-	const bridge = await startEphemeralBridge(`socks5h://alice:secret@127.0.0.1:${upstreamAddress.port}`);
-	const client = net.createConnection({host: '127.0.0.1', port: bridge.port});
-	const response = new Promise<string>((resolve, reject) => {
-		client.once('data', chunk => resolve(chunk.toString('latin1')));
-		client.once('error', reject);
-	});
-	client.write('CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: api.anthropic.com:443\r\n\r\n');
-	assert.match(await response, /^HTTP\/1\.1 200/);
-	assert.equal(requested, 'api.anthropic.com');
-	await bridge.waitForTunnel(100);
-	client.destroy();
-	await bridge.close();
-	await new Promise<void>(resolve => upstream.close(() => resolve()));
-});
-
-test('browser probe proves Chrome reached the CPM bridge before configured redirect', async () => {
-	const redirect = 'https://ip.net.coffee/claude/';
-	const bridge = await startEphemeralBridge('socks5h://alice:secret@127.0.0.1:9', redirect);
-	const client = net.createConnection({host: '127.0.0.1', port: bridge.port});
-	const response = new Promise<string>((resolve, reject) => {
-		client.once('data', chunk => resolve(chunk.toString('latin1')));
-		client.once('error', reject);
-	});
-	client.end(`GET ${bridge.probeUrl} HTTP/1.1\r\nHost: cpm.internal\r\nConnection: close\r\n\r\n`);
-	assert.match(await response, /^HTTP\/1\.1 302 Found/);
-	assert.match(await response, /Location: https:\/\/ip\.net\.coffee\/claude\//);
-	await bridge.waitForProbe(100);
-	await bridge.close();
 });
 
 test('Claude proxy preflight prints checks and blocks startup on FAIL', async () => {

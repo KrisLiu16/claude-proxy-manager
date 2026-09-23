@@ -1,7 +1,7 @@
 {
   "name": "claude-proxy-manager",
-  "version": "0.8.1",
-  "description": "Manage remote development machines and run Claude through an integrated proxy",
+  "version": "0.9.0",
+  "description": "Create a persistent isolated workspace on a Linux development machine",
   "type": "module",
   "bin": {
     "cpm": "dist/cli.js"

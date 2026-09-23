@@ -2,7 +2,7 @@ import {spawn} from 'node:child_process';
 import {createHash, randomBytes} from 'node:crypto';
 import {constants as fsConstants} from 'node:fs';
 import {access, chmod, mkdir, readFile, realpath, rm, writeFile} from 'node:fs/promises';
-import net, {type AddressInfo, type Socket} from 'node:net';
+import net, {type Socket} from 'node:net';
 import {homedir} from 'node:os';
 import {basename, dirname, join} from 'node:path';
 import tls from 'node:tls';
@@ -58,7 +58,7 @@ export async function readRuntimeConfig(): Promise<RuntimeConfig> {
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
 	}
-	const proxyUrl = process.env.CPM_SOCKS5_PROXY || process.env.SOCKS5_PROXY || values.get('SOCKS5_PROXY') || '';
+	const proxyUrl = process.env.CPM_SOCKS5_PROXY || values.get('SOCKS5_PROXY') || '';
 	const portText = process.env.CPM_HTTP_PORT || values.get('HTTP_PORT') || String(DEFAULT_PORT);
 	return {
 		proxyUrl,
@@ -312,7 +312,7 @@ async function readHttpHead(client: Socket): Promise<{head: Buffer; rest: Buffer
 	});
 }
 
-async function handleProxyClient(client: Socket, proxyUrl: string, healthToken: string, onHealth?: () => void, healthRedirect?: string, onTunnel?: () => void, dial?: (host: string, port: number) => Promise<Socket>): Promise<void> {
+async function handleProxyClient(client: Socket, proxyUrl: string, healthToken: string, dial?: (host: string, port: number) => Promise<Socket>): Promise<void> {
 	let upstream: Socket | undefined;
 	client.once('close', () => upstream?.destroy());
 	try {
@@ -321,25 +321,18 @@ async function handleProxyClient(client: Socket, proxyUrl: string, healthToken: 
 		const [method = '', target = '', protocol = ''] = (lines.shift() || '').split(' ');
 		if (!method || !target || !protocol) throw new Error('HTTP 请求行无效');
 		if (method === 'GET' && target === `http://cpm.internal/__health/${healthToken}`) {
-			onHealth?.();
-			if (healthRedirect) {
-				client.end(`HTTP/1.1 302 Found\r\nLocation: ${healthRedirect}\r\nContent-Length: 0\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n`);
-			} else {
-				client.end(`HTTP/1.1 200 OK\r\nContent-Length: ${healthToken.length}\r\nConnection: close\r\n\r\n${healthToken}`);
-			}
+			client.end(`HTTP/1.1 200 OK\r\nContent-Length: ${healthToken.length}\r\nConnection: close\r\n\r\n${healthToken}`);
 			return;
 		}
 		if (method.toUpperCase() === 'CONNECT') {
 			const [host, port] = splitHostPort(target, 443);
 			upstream = await (dial ? dial(host, port) : socksConnect(proxyUrl, host, port));
-			onTunnel?.();
 			client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
 			if (rest.length) upstream.write(rest);
 		} else {
 			const url = new URL(target);
 			if (url.protocol !== 'http:') throw new Error('仅支持 HTTP 绝对地址或 CONNECT');
 			upstream = await (dial ? dial(url.hostname, Number(url.port || 80)) : socksConnect(proxyUrl, url.hostname, Number(url.port || 80)));
-			onTunnel?.();
 			const filtered = lines.filter(line => !/^(proxy-connection|proxy-authorization|connection|keep-alive):/i.test(line));
 			if (!filtered.some(line => /^host:/i.test(line))) filtered.push('Host: ' + url.host);
 			const path = `${url.pathname || '/'}${url.search}`;
@@ -354,83 +347,7 @@ async function handleProxyClient(client: Socket, proxyUrl: string, healthToken: 
 }
 
 export async function handleSidecarHttp(client: Socket, proxyUrl: string, dial: (host: string, port: number) => Promise<Socket>): Promise<void> {
-	await handleProxyClient(client, proxyUrl, '', undefined, undefined, undefined, dial);
-}
-
-export type EphemeralBridge = {
-	port: number;
-	probeUrl: string;
-	waitForProbe: (timeoutMs?: number) => Promise<void>;
-	waitForTunnel: (timeoutMs?: number) => Promise<void>;
-	close: () => Promise<void>;
-};
-
-/**
- * Starts a loopback-only HTTP to SOCKS5 bridge without writing the proxy URL
- * or its credentials to disk. This is used by the short-lived login browser.
- */
-export async function startEphemeralBridge(proxyUrl: string, healthRedirect?: string): Promise<EphemeralBridge> {
-	parseProxy(proxyUrl);
-	if (healthRedirect && /[\r\n]/.test(healthRedirect)) throw new Error('浏览器探针跳转地址无效');
-	const sockets = new Set<Socket>();
-	const healthToken = randomBytes(24).toString('hex');
-	let probed = false;
-	const probeWaiters = new Set<() => void>();
-	let tunneled = false;
-	const tunnelWaiters = new Set<() => void>();
-	const markProbed = () => {
-		probed = true;
-		for (const resolve of probeWaiters) resolve();
-		probeWaiters.clear();
-	};
-	const markTunneled = () => {
-		tunneled = true;
-		for (const resolve of tunnelWaiters) resolve();
-		tunnelWaiters.clear();
-	};
-	const server = net.createServer(client => {
-		sockets.add(client);
-		client.once('close', () => sockets.delete(client));
-		void handleProxyClient(client, proxyUrl, healthToken, markProbed, healthRedirect, markTunneled);
-	});
-	await new Promise<void>((resolve, reject) => {
-		server.once('error', reject);
-		server.listen(0, '127.0.0.1', resolve);
-	});
-	const address = server.address() as AddressInfo;
-	let closed = false;
-	return {
-		port: address.port,
-		probeUrl: `http://cpm.internal/__health/${healthToken}`,
-		waitForProbe: async (timeoutMs = 10_000) => {
-			if (probed) return;
-			await new Promise<void>((resolve, reject) => {
-				const timer = setTimeout(() => {
-					probeWaiters.delete(done);
-					reject(new Error('Chrome 未连接 CPM 本机代理；请确认已用 ⌘Q 完全退出所有 Chrome 后重试'));
-				}, timeoutMs);
-				const done = () => { clearTimeout(timer); resolve(); };
-				probeWaiters.add(done);
-			});
-		},
-		waitForTunnel: async (timeoutMs = 15_000) => {
-			if (tunneled) return;
-			await new Promise<void>((resolve, reject) => {
-				const timer = setTimeout(() => {
-					tunnelWaiters.delete(done);
-					reject(new Error('Chrome 已连接 CPM，但无法通过所配置的 SOCKS5 代理建立 HTTPS 隧道'));
-				}, timeoutMs);
-				const done = () => { clearTimeout(timer); resolve(); };
-				tunnelWaiters.add(done);
-			});
-		},
-		close: async () => {
-			if (closed) return;
-			closed = true;
-			for (const socket of sockets) socket.destroy();
-			await new Promise<void>(resolve => server.close(() => resolve()));
-		},
-	};
+	await handleProxyClient(client, proxyUrl, '', dial);
 }
 
 export async function runBridge(configFile: string, port: number, healthToken: string): Promise<never> {
@@ -628,7 +545,6 @@ export async function inspectProxyRuntime(target: 'claude' | 'generic' = 'claude
 		rows.push(row('地理信息 API', config.timezone === 'auto' || config.locale === 'auto' ? 'FAIL' : 'WARN', '探测失败', resolution.error || '没有返回数据'));
 	}
 	rows.push(row('DNS 模式', parsed?.protocol === 'socks5h:' ? 'PASS' : 'WARN', parsed?.protocol === 'socks5h:' ? 'SOCKS5H 远端解析' : '非远端解析'));
-	rows.push(row('浏览器集成', 'PASS', '--no-chrome'));
 	rows.push(row('开发机直连 IP', 'INFO', '未探测', '启动检查不从宿主机直连外网'));
 	if (parsed) {
 		if (exitIp) {
@@ -671,7 +587,7 @@ async function runSandboxTarget(command: string, args: string[]): Promise<number
 		exitIp = rows.find(item => item.name === '代理出口 IP' && item.state === 'PASS')?.value || '';
 		return rows;
 	})) {
-		console.error('cpm: 启动前检查存在 FAIL，已停止启动 Claude');
+		console.error('cpm: 启动前检查存在 FAIL，已停止启动目标命令');
 		return 3;
 	}
 	await ensureBridge(config);
