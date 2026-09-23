@@ -29,7 +29,7 @@ curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main
 安装指定版本：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main/install.sh | CPM_VERSION=v0.8.0 sh
+curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main/install.sh | CPM_VERSION=v0.8.1 sh
 ```
 
 安装器支持 Linux/macOS 的 x64 和 arm64，验证 Release 资产的 SHA-256，默认写入 `~/.local/bin/cpm`。可用以下变量调整：
@@ -37,7 +37,7 @@ curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main
 ```text
 CPM_INSTALL_DIR=/custom/bin
 CPM_NO_MODIFY_PATH=1
-CPM_VERSION=v0.8.0
+CPM_VERSION=v0.8.1
 ```
 
 ## 工作方式
@@ -146,7 +146,8 @@ cpm proxy
 cpm proxy codex
 cpm proxy -- python3 --version
 cpm sandbox -- git clone https://example.com/project.git
-cpm sandbox -- bash
+cpm enter                         # 打开同一个持久工作区的 bash
+cpm exec -- git status            # 在工作区执行一条命令
 cpm proxy --check
 ```
 
@@ -195,7 +196,9 @@ CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 
 容器使用 Docker 的 `network none`：外部 TCP、UDP 和 IPv6 直连都无法建立。容器里的回环 HTTP/SOCKS 服务通过只读挂载的 Unix socket 联系宿主 sidecar；每台机器的白名单由 sidecar 决定，应用程序不能用 `NO_PROXY` 绕过。未使用代理的网络工具会失败，可以改用支持 HTTP/SOCKS 代理的方式。
 
-宿主项目和 HOME 不挂入容器。容器有自己的 `/home/node` 与 `/workspace` 持久卷，可在里面克隆代码、建立 Python 虚拟环境、安装 npm 包并保留登录状态。根文件系统只读，`/tmp` 和 `/run` 为临时文件系统；需要新增系统包时，要重建基础镜像。容器禁用所有 Linux capability，启用 `no-new-privileges`、seccomp、AppArmor 与进程/内存限额。Linux 内核和容器运行痕迹仍可能被检测到，不能承诺程序无法识别自己处于容器中。
+宿主项目和 HOME 不挂入容器。同一台开发机、同一用户运行 `claude`、Codex、`cpm enter` 或 `cpm exec` 时，挂载同一组 `/home/node` 与 `/workspace` 具名卷。仓库、Python 虚拟环境、npm 包和登录状态写在这两个目录就会跨启动保留；CPM 不自动删除卷。如果卷被外部删除，CPM 会报错并停止，避免静默创建空环境。[Docker 具名卷说明](https://docs.docker.com/engine/storage/volumes/)
+
+每条命令使用新的进程容器，退出时运行中的后台进程会结束；`/tmp`、`/run` 和容器根文件系统不会保留。根文件系统只读，需要新增系统包时要重建基础镜像。容器禁用所有 Linux capability，启用 `no-new-privileges`、seccomp、AppArmor 与进程/内存限额。Linux 内核和容器运行痕迹仍可能被检测到，不能承诺程序无法识别自己处于容器中。
 
 [Claude-Shield](https://github.com/CACEB001/Claude-Shield) 的扫描、locale 和代理审计思路可用于对照检查；它的二进制补丁针对历史 Claude 版本，仓库说明相关路径在 2.1.197+ 已移除。CPM 不修改官方 Claude 或 Codex 的二进制。容器内首次使用时，用户需要自行完成对应 CLI 的登录。
 
@@ -224,6 +227,7 @@ CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 ~/.local/state/cpm/bridge-17891.pid
 ~/.local/state/cpm/bridge-17891.log
 ~/.local/state/cpm/geolocation.json
+~/.local/state/cpm/sandbox-volumes.json
 ```
 
 Docker 管理的持久卷为 `cpm-home-<ID>` 和 `cpm-workspace-<ID>`。CPM 不会自动删除其中的代码或登录状态。

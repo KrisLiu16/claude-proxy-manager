@@ -12,7 +12,7 @@ import {statusSummary} from './types.js';
 import {inspectProxyRuntime, readRuntimeConfig, resolvedRuntimeEnvironment, runBridge, runClaudeProxy, runGenericSandbox, stopBridge} from './proxy-runtime.js';
 import {applyRemoteConfig, remoteStatus, toggleRemote} from './remote.js';
 import {VERSION} from './version.js';
-import {ensureContainerImage, prepareDockerEngine} from './isolated-sandbox.js';
+import {ensureContainerImage, ensurePersistentVolumes, prepareDockerEngine} from './isolated-sandbox.js';
 import {runContainerCommand} from './container-relay.js';
 
 async function handleRuntimeMode(): Promise<boolean> {
@@ -23,6 +23,18 @@ async function handleRuntimeMode(): Promise<boolean> {
 	}
 	if (command === 'sandbox') {
 		process.exitCode = await runGenericSandbox(process.argv.slice(3));
+		return true;
+	}
+	if (command === 'enter') {
+		const raw = process.argv.slice(3);
+		const args = raw[0] === '--' ? raw.slice(1) : raw;
+		process.exitCode = await runGenericSandbox(args.length ? args : ['bash']);
+		return true;
+	}
+	if (command === 'exec') {
+		const args = process.argv.slice(3);
+		if (!args.length || args.length === 1 && args[0] === '--') throw new Error('cpm exec 后需要指定命令');
+		process.exitCode = await runGenericSandbox(args);
 		return true;
 	}
 	if (command === '__container-run') {
@@ -36,6 +48,7 @@ async function handleRuntimeMode(): Promise<boolean> {
 		if (rows.some(item => item.state === 'FAIL')) throw new Error('代理检查未通过，无法构建独立容器');
 		const resolved = await resolvedRuntimeEnvironment();
 		const config = await readRuntimeConfig();
+		await ensurePersistentVolumes();
 		process.stdout.write(`${await ensureContainerImage({...config, ...resolved})}\n`);
 		return true;
 	}
@@ -136,6 +149,8 @@ program.command('check <name>').description('检查远端状态和代理连通�
 
 program.command('proxy [args...]').description('在独立容器中运行 Claude，或用 cpm proxy codex 运行 Codex');
 program.command('sandbox [args...]').description('在独立容器中运行任意命令，默认 Claude');
+program.command('enter [args...]').description('进入共享的独立工作区，默认打开 bash');
+program.command('exec [args...]').description('在共享的独立工作区运行一条命令');
 
 program.command('setup <name>').description('安装、配置并应用默认替换开关').action(async name => {
 	const {hosts, ssh, secrets} = await context();

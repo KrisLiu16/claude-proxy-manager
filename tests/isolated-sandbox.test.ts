@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {containerRunArguments} from '../src/isolated-sandbox.js';
+import {containerRunArguments, verifyVolumeIdentity, volumeAction} from '../src/isolated-sandbox.js';
 import {genericTarget, proxyTarget} from '../src/proxy-runtime.js';
 
 test('proxy defaults to Claude and accepts Codex or an explicit arbitrary command', () => {
@@ -40,4 +40,16 @@ test('generic container has no host workspace or credentials and no direct netwo
 	assert.equal(args.join(' ').includes('secret'), false);
 	assert.equal(args.join(' ').includes('/home/ubuntu'), false);
 	assert.deepEqual(args.slice(-4), ['/usr/local/bin/cpm', '__container-run', 'codex', '--version']);
+});
+
+test('a missing persistent volume stops launch instead of silently creating an empty workspace', () => {
+	assert.equal(volumeAction(false, false, false), 'create');
+	assert.equal(volumeAction(false, true, true), 'adopt');
+	assert.equal(volumeAction(true, true, true), 'reuse');
+	assert.throws(() => volumeAction(true, false, true), /已丢失/);
+	assert.throws(() => volumeAction(true, true, false), /已丢失/);
+	assert.throws(() => volumeAction(false, true, false), /只剩一部分/);
+	const first = {homeCreatedAt: '2026-09-23T01:00:00Z', workspaceCreatedAt: '2026-09-23T01:00:01Z'};
+	assert.doesNotThrow(() => verifyVolumeIdentity(first, {...first}));
+	assert.throws(() => verifyVolumeIdentity(first, {...first, workspaceCreatedAt: '2026-09-24T01:00:00Z'}), /已被替换/);
 });

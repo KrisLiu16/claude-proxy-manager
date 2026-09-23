@@ -1,7 +1,7 @@
 import {spawn} from 'node:child_process';
 import {createHash, randomBytes} from 'node:crypto';
 import {createReadStream} from 'node:fs';
-import {access, copyFile, mkdir, mkdtemp, readFile, rm, writeFile} from 'node:fs/promises';
+import {access, copyFile, mkdir, mkdtemp, readFile, rename, rm, writeFile} from 'node:fs/promises';
 import {homedir, tmpdir} from 'node:os';
 import {basename, join} from 'node:path';
 import {startNetworkSidecar} from './network-sidecar.js';
@@ -117,6 +117,68 @@ function volumeId(): string {
 	return createHash('sha256').update(`${process.getuid?.() || 0}\0${homedir()}`).digest('hex').slice(0, 16);
 }
 
+type VolumeNames = {version: 1; id: string; home: string; workspace: string};
+type VolumeRecord = VolumeNames & {homeCreatedAt: string; workspaceCreatedAt: string};
+
+function volumeNames(id: string): VolumeNames {
+	return {version: 1, id, home: `cpm-home-${id}`, workspace: `cpm-workspace-${id}`};
+}
+
+function volumeRecordPath(): string {
+	return join(homedir(), '.local', 'state', 'cpm', 'sandbox-volumes.json');
+}
+
+export function volumeAction(recorded: boolean, homeExists: boolean, workspaceExists: boolean): 'create' | 'adopt' | 'reuse' {
+	if (recorded && (!homeExists || !workspaceExists)) throw new Error('CPM 持久卷已丢失；为避免生成空环境，已停止启动');
+	if (homeExists !== workspaceExists) throw new Error('CPM 持久卷只剩一部分；为避免覆盖原环境，已停止启动');
+	return recorded ? 'reuse' : homeExists ? 'adopt' : 'create';
+}
+
+export function verifyVolumeIdentity(recorded: Pick<VolumeRecord, 'homeCreatedAt' | 'workspaceCreatedAt'>, actual: Pick<VolumeRecord, 'homeCreatedAt' | 'workspaceCreatedAt'>): void {
+	if (recorded.homeCreatedAt !== actual.homeCreatedAt || recorded.workspaceCreatedAt !== actual.workspaceCreatedAt) {
+		throw new Error('CPM 持久卷已被替换；为避免误用空环境，已停止启动');
+	}
+}
+
+export async function ensurePersistentVolumes(): Promise<VolumeRecord> {
+	const expected = volumeNames(volumeId());
+	const path = volumeRecordPath();
+	let stored: Partial<VolumeRecord> | undefined;
+	try {
+		stored = JSON.parse(await readFile(path, 'utf8')) as Partial<VolumeRecord>;
+		if (stored.version !== 1 || stored.id !== expected.id || stored.home !== expected.home || stored.workspace !== expected.workspace) {
+			throw new Error('CPM 持久卷记录与当前用户不一致，已停止启动');
+		}
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+	}
+	const [home, workspace] = await Promise.all([
+		docker(['volume', 'inspect', expected.home, '--format', '{{.CreatedAt}}']),
+		docker(['volume', 'inspect', expected.workspace, '--format', '{{.CreatedAt}}']),
+	]);
+	const action = volumeAction(Boolean(stored), home.code === 0, workspace.code === 0);
+	if (action === 'create') {
+		for (const name of [expected.home, expected.workspace]) {
+			const result = await docker(['volume', 'create', name]);
+			if (result.code !== 0) throw new Error(`无法创建持久卷 ${name}：${result.stderr.trim()}`);
+		}
+	}
+	const homeCreatedAt = action === 'create' ? (await docker(['volume', 'inspect', expected.home, '--format', '{{.CreatedAt}}'])).stdout.trim() : home.stdout.trim();
+	const workspaceCreatedAt = action === 'create' ? (await docker(['volume', 'inspect', expected.workspace, '--format', '{{.CreatedAt}}'])).stdout.trim() : workspace.stdout.trim();
+	if (!homeCreatedAt || !workspaceCreatedAt) throw new Error('无法确认 CPM 持久卷的创建时间');
+	const record: VolumeRecord = {...expected, homeCreatedAt, workspaceCreatedAt};
+	if (stored) verifyVolumeIdentity(stored as VolumeRecord, record);
+	if (action !== 'reuse') {
+		await mkdir(join(homedir(), '.local', 'state', 'cpm'), {recursive: true, mode: 0o700});
+		const temporary = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
+		try {
+			await writeFile(temporary, `${JSON.stringify(record)}\n`, {mode: 0o600});
+			await rename(temporary, path);
+		} finally { await rm(temporary, {force: true}); }
+	}
+	return record;
+}
+
 export async function ensureContainerImage(config: RuntimeConfig): Promise<string> {
 	validatedRegion(config);
 	const checks = await inspectContainerPrerequisites();
@@ -200,12 +262,13 @@ export function containerRunArguments(start: ContainerStart): string[] {
 
 export async function runIsolatedContainer(config: RuntimeConfig, executable: string, args: string[], expectedExitIp: string): Promise<number> {
 	if (!expectedExitIp) throw new Error('没有经过代理验证的出口 IP，停止启动独立容器');
+	const volumes = await ensurePersistentVolumes();
 	const image = await ensureContainerImage(config);
 	const directory = await mkdtemp(join(tmpdir(), 'cpm-egress-'));
 	let sidecar: Awaited<ReturnType<typeof startNetworkSidecar>> | undefined;
 	try {
 		sidecar = await startNetworkSidecar(directory, config);
-		const id = volumeId();
+		const id = volumes.id;
 		const options = containerRunArguments({
 			image, directory, name: `cpm-run-${id}-${randomBytes(4).toString('hex')}`,
 			volumeId: id, uid: process.getuid!(), gid: process.getgid!(), config,
