@@ -4,6 +4,7 @@ import {access, chmod, mkdir, readFile, rename, rm, stat, writeFile} from 'node:
 import {homedir} from 'node:os';
 import {dirname, join, resolve} from 'node:path';
 import {inspectProxyRuntime, readRuntimeConfig, stopBridge} from './proxy-runtime.js';
+import {inspectSandboxPrerequisites} from './linux-sandbox.js';
 import type {CheckItem, RemoteStatus} from './types.js';
 
 const START = '# >>> cpm >>>';
@@ -125,6 +126,7 @@ export async function remoteStatus(): Promise<RemoteStatus> {
 	try { checks = await inspectProxyRuntime(); }
 	catch (error) { checks = [{name: '运行时检查', state: 'FAIL', value: '失败', detail: (error as Error).message}]; }
 	checks.unshift({name: 'SSH 连接', state: 'PASS', value: '正常'});
+	checks.push(...await inspectSandboxPrerequisites());
 	const replacement = await replaceEnabled();
 	checks.push({name: '默认替换', state: replacement ? 'PASS' : 'INFO', value: replacement ? '开启' : '关闭'});
 	if (replacement) {

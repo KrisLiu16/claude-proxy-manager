@@ -229,6 +229,7 @@ export class SSHClient {
 
 	private async installSteps(host: HostProfile, reporter?: ProgressReporter): Promise<void> {
 		const probe = await this.probe(host);
+		if (!probe.get('platform')?.startsWith('linux-')) throw new Error('强制隔离代理目前要求 Linux 开发机');
 		await this.ensureClaude(host, scoped(reporter, 0, 52), probe);
 		report(reporter, 56, '正在确认开发机平台和 cpm 版本');
 		if (probe.get('unsupported')) throw new Error(`cpm 不支持远端平台 ${probe.get('unsupported')}`);
@@ -236,6 +237,8 @@ export class SSHClient {
 		if (!platform) throw new Error('无法识别远端平台');
 		if (probe.get('cpm_path') && probe.get('cpm_version') === VERSION) {
 			report(reporter, 64, `远端 cpm ${VERSION} 已是当前版本，跳过下载和上传`);
+			report(reporter, 75, '正在确认开发机沙箱组件');
+			await this.run(host.sshHost, 'exec "$HOME/.local/bin/cpm" __sandbox-prepare', '', 180_000);
 			report(reporter, 100, 'Claude 与 cpm 运行时已就绪');
 			return;
 		}
@@ -244,6 +247,8 @@ export class SSHClient {
 		try {
 			report(reporter, 78, '正在通过 SSH 上传并校验 cpm');
 			await this.runFile(host.sshHost, `sh -c ${shellQuote(installRuntimeScript)}`, runtime.binaryPath, 10 * 60_000, transferReporter(reporter, 78, 98, '正在通过 SSH 上传 cpm'));
+			report(reporter, 99, '正在准备开发机沙箱组件');
+			await this.run(host.sshHost, 'exec "$HOME/.local/bin/cpm" __sandbox-prepare', '', 180_000);
 			report(reporter, 100, 'Claude 与 cpm 运行时已就绪');
 		}
 		finally { await runtime.cleanup(); }

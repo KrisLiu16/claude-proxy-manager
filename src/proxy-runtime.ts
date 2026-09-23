@@ -10,6 +10,7 @@ import {domainToASCII} from 'node:url';
 import {statusSummary, type CheckItem, type CheckState} from './types.js';
 import {VERSION} from './version.js';
 import {loadCachedGeo, lookupGeoProfile, saveCachedGeo, type GeoProfile} from './geolocation.js';
+import {inspectSandboxPrerequisites, runInLinuxSandbox} from './linux-sandbox.js';
 
 const DEFAULT_PORT = 17_891;
 const DEFAULT_TIMEZONE = 'auto';
@@ -151,7 +152,7 @@ export async function socksConnect(proxyUrl: string, targetHost: string, targetP
 
 type HttpResult = {status: number; body: string};
 
-async function httpsRequest(host: string, path: string, socket?: Socket): Promise<HttpResult> {
+export async function httpsRequest(host: string, path: string, socket?: Socket): Promise<HttpResult> {
 	return await new Promise((resolve, reject) => {
 		const secure = tls.connect({host, port: 443, socket, servername: host, rejectUnauthorized: true});
 		const timer = setTimeout(() => secure.destroy(new Error(`HTTPS ${host} 超时`)), 20_000);
@@ -311,7 +312,7 @@ async function readHttpHead(client: Socket): Promise<{head: Buffer; rest: Buffer
 	});
 }
 
-async function handleProxyClient(client: Socket, proxyUrl: string, healthToken: string, onHealth?: () => void, healthRedirect?: string, onTunnel?: () => void): Promise<void> {
+async function handleProxyClient(client: Socket, proxyUrl: string, healthToken: string, onHealth?: () => void, healthRedirect?: string, onTunnel?: () => void, dial?: (host: string, port: number) => Promise<Socket>): Promise<void> {
 	let upstream: Socket | undefined;
 	client.once('close', () => upstream?.destroy());
 	try {
@@ -330,14 +331,14 @@ async function handleProxyClient(client: Socket, proxyUrl: string, healthToken: 
 		}
 		if (method.toUpperCase() === 'CONNECT') {
 			const [host, port] = splitHostPort(target, 443);
-			upstream = await socksConnect(proxyUrl, host, port);
+			upstream = await (dial ? dial(host, port) : socksConnect(proxyUrl, host, port));
 			onTunnel?.();
 			client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
 			if (rest.length) upstream.write(rest);
 		} else {
 			const url = new URL(target);
 			if (url.protocol !== 'http:') throw new Error('仅支持 HTTP 绝对地址或 CONNECT');
-			upstream = await socksConnect(proxyUrl, url.hostname, Number(url.port || 80));
+			upstream = await (dial ? dial(url.hostname, Number(url.port || 80)) : socksConnect(proxyUrl, url.hostname, Number(url.port || 80)));
 			onTunnel?.();
 			const filtered = lines.filter(line => !/^(proxy-connection|proxy-authorization|connection|keep-alive):/i.test(line));
 			if (!filtered.some(line => /^host:/i.test(line))) filtered.push('Host: ' + url.host);
@@ -350,6 +351,10 @@ async function handleProxyClient(client: Socket, proxyUrl: string, healthToken: 
 		if (!client.destroyed) client.end('HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n');
 		upstream?.destroy();
 	}
+}
+
+export async function handleSidecarHttp(client: Socket, proxyUrl: string, dial: (host: string, port: number) => Promise<Socket>): Promise<void> {
+	await handleProxyClient(client, proxyUrl, '', undefined, undefined, undefined, dial);
 }
 
 export type EphemeralBridge = {
@@ -597,14 +602,14 @@ export async function inspectProxyRuntime(): Promise<CheckItem[]> {
 	const proxy = `http://127.0.0.1:${config.httpPort}`;
 	for (const name of ['ALL_PROXY', 'all_proxy', 'HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy'] as const) rows.push(row(name, env[name] === proxy ? 'PASS' : 'FAIL', env[name] || '<空>'));
 	for (const name of ['NO_PROXY', 'no_proxy'] as const) rows.push(row(name, env[name] === config.noProxy ? 'PASS' : 'FAIL', env[name] || '<空>'));
-	rows.push(row('TZ', resolution.error && config.timezone === 'auto' ? 'WARN' : env.TZ === resolved.timezone ? 'PASS' : 'FAIL', env.TZ || '<空>', config.timezone === 'auto' ? '自动注入' : '手动配置'));
+	rows.push(row('TZ', resolution.error && config.timezone === 'auto' ? resolution.geo ? 'WARN' : 'FAIL' : env.TZ === resolved.timezone ? 'PASS' : 'FAIL', env.TZ || '<空>', config.timezone === 'auto' ? '自动注入' : '手动配置'));
 	try {
 		const now = new Date();
 		const short = new Intl.DateTimeFormat('en-US', {timeZone: resolved.timezone, timeZoneName: 'short'}).formatToParts(now).find(part => part.type === 'timeZoneName')?.value;
 		const offset = new Intl.DateTimeFormat('en-US', {timeZone: resolved.timezone, timeZoneName: 'shortOffset'}).formatToParts(now).find(part => part.type === 'timeZoneName')?.value;
 		rows.push(row('时区实际值', 'PASS', [short, offset].filter(Boolean).join(' ')));
 	} catch (error) { rows.push(row('时区实际值', 'FAIL', '无效时区', (error as Error).message)); }
-	for (const name of ['LANG', 'LC_ALL', 'LC_CTYPE', 'LC_MESSAGES'] as const) rows.push(row(name, resolution.error && config.locale === 'auto' ? 'WARN' : env[name] === resolved.locale ? 'PASS' : 'FAIL', env[name] || '<空>', config.locale === 'auto' ? '自动注入' : '手动配置'));
+	for (const name of ['LANG', 'LC_ALL', 'LC_CTYPE', 'LC_MESSAGES'] as const) rows.push(row(name, resolution.error && config.locale === 'auto' ? resolution.geo ? 'WARN' : 'FAIL' : env[name] === resolved.locale ? 'PASS' : 'FAIL', env[name] || '<空>', config.locale === 'auto' ? '自动注入' : '手动配置'));
 	rows.push(row('CLAUDE_CONFIG_DIR', config.claudeConfigDir && env.CLAUDE_CONFIG_DIR === config.claudeConfigDir ? 'PASS' : 'INFO', config.claudeConfigDir || '<Claude 默认目录>'));
 	if (resolution.geo) {
 		const geo = resolution.geo;
@@ -620,7 +625,7 @@ export async function inspectProxyRuntime(): Promise<CheckItem[]> {
 		rows.push(row('探测时区', geo.timezone ? 'PASS' : 'WARN', geo.timezone || '<未知>'));
 		rows.push(row('探测语言', geo.languages ? 'PASS' : 'INFO', geo.languages || '<API 未提供>', `locale=${geo.locale}`));
 	} else {
-		rows.push(row('地理信息 API', 'WARN', '探测失败', resolution.error || '没有返回数据'));
+		rows.push(row('地理信息 API', config.timezone === 'auto' || config.locale === 'auto' ? 'FAIL' : 'WARN', '探测失败', resolution.error || '没有返回数据'));
 	}
 	rows.push(row('DNS 模式', parsed?.protocol === 'socks5h:' ? 'PASS' : 'WARN', parsed?.protocol === 'socks5h:' ? 'SOCKS5H 远端解析' : '非远端解析'));
 	rows.push(row('浏览器集成', 'PASS', '--no-chrome'));
@@ -662,12 +667,17 @@ export async function runClaudeProxy(args: string[]): Promise<number> {
 	parseProxy(config.proxyUrl);
 	if (!await executable(config.claudeBin)) throw new Error(`Claude CLI 不存在：${config.claudeBin || '<未配置>'}`);
 	if (args[0] === '--check' || args[0] === 'check') {
-		const rows = await inspectProxyRuntime();
+		const rows = [...await inspectProxyRuntime(), ...await inspectSandboxPrerequisites()];
 		console.log(formatCheckTable(rows));
 		return rows.some(item => item.state === 'FAIL') ? 3 : 0;
 	}
 	if (args[0] === '--stop-bridge') { await stopBridge(config.httpPort); return 0; }
-	if (!await runProxyPreflight()) {
+	let exitIp = '';
+	if (!await runProxyPreflight(async () => {
+		const rows = [...await inspectProxyRuntime(), ...await inspectSandboxPrerequisites()];
+		exitIp = rows.find(item => item.name === '代理出口 IP' && item.state === 'PASS')?.value || '';
+		return rows;
+	})) {
 		console.error('cpm: 启动前检查存在 FAIL，已停止启动 Claude');
 		return 3;
 	}
@@ -678,12 +688,5 @@ export async function runClaudeProxy(args: string[]): Promise<number> {
 			? `cpm: IP 地理信息实时探测失败，复用上次缓存：${resolution.error}`
 			: `cpm: IP 地理信息探测失败且没有缓存，使用默认时区/语言：${resolution.error}`);
 	}
-	return await new Promise((resolve, reject) => {
-		const child = spawn(config.claudeBin, ['--no-chrome', ...args], {stdio: 'inherit', env: proxyEnvironment(resolution.config)});
-		child.once('error', reject);
-		child.once('exit', (code, signal) => {
-			if (signal) process.kill(process.pid, signal);
-			resolve(code ?? 1);
-		});
-	});
+	return await runInLinuxSandbox(resolution.config, args, exitIp);
 }

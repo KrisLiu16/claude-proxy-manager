@@ -6,7 +6,7 @@
 - 安装官方 Claude Code
 - 把适合开发机平台的 `cpm` 分发到远端
 - 内置 HTTP → SOCKS5 bridge
-- 使用完整代理环境运行 Claude Code
+- 在 Linux 开发机的独立进程和网络空间中运行 Claude Code
 - 逐项检查文件、网络、环境变量、时区和出口 IP
 - 安装和设置时显示阶段、百分比、传输 MiB 与已用时间
 
@@ -29,7 +29,7 @@ curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main
 安装指定版本：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main/install.sh | CPM_VERSION=v0.6.1 sh
+curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main/install.sh | CPM_VERSION=v0.7.0 sh
 ```
 
 安装器支持 Linux/macOS 的 x64 和 arm64，验证 Release 资产的 SHA-256，默认写入 `~/.local/bin/cpm`。可用以下变量调整：
@@ -37,7 +37,7 @@ curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main
 ```text
 CPM_INSTALL_DIR=/custom/bin
 CPM_NO_MODIFY_PATH=1
-CPM_VERSION=v0.6.1
+CPM_VERSION=v0.7.0
 ```
 
 ## 工作方式
@@ -54,16 +54,17 @@ CPM_VERSION=v0.6.1
 
 开发机 cpm proxy
   ├─ 读取 ~/.config/cpm/proxy.env
-  ├─ 在 127.0.0.1:17891 启动内置 TypeScript bridge
-  ├─ bridge 使用 SOCKS5H 认证和远端 DNS
-  ├─ 通过代理出口探测 IP 地理信息，并缓存时区与语言
-  ├─ 为 Claude 设置代理、白名单、时区和 locale
-  └─ 执行真实 Claude，并自动加入 --no-chrome
+  ├─ 启动前验证 SOCKS5、代理出口与地理信息
+  ├─ 创建独立网络、进程、主机名和挂载空间
+  ├─ 保留开发机文件系统读写，覆盖 /etc/localtime 等宿主信息入口
+  ├─ sidecar 处理 TCP 出网、合成 DNS 与内网白名单
+  ├─ 在沙箱内部复查出口 IP、路由、DNS、时区和主机名
+  └─ 执行真实 Claude 及其子进程，并自动加入 --no-chrome
 ```
 
-开发机不访问 GitHub 或 npm。下载和完整性校验都发生在运行管理器的本机，文件再经 SSH 传输。
+开发机不访问 GitHub 或 npm 来安装 Claude/cpm。开发机缺少 redsocks 时，`s` 通过系统 apt 源下载并解包这项网络组件。
 
-开发机运行时支持 glibc Linux 与 macOS 的 x64/arm64。
+管理器支持 Linux/macOS x64 与 arm64；强制隔离的 `cpm proxy` 当前支持 Linux 开发机。开发机需要 `sudo -n` 能创建 namespace，并具备 `unshare`、`mount`、`ip`、`nft`、`setpriv`。隔离不可用时启动会失败，不会退回到只设置代理环境变量的模式。
 
 ## TUI
 
@@ -85,7 +86,7 @@ q    退出
 
 安装过程会实时显示当前阶段。下载 Claude/cpm 和 SSH 上传时同时显示已传输 MiB，远端检查阶段持续显示已用时间。
 
-`s` 是幂等操作：开发机已有 Claude Code 时直接复用；远端 `cpm --version` 与当前管理器版本一致时，跳过 cpm 下载、校验和 SSH 上传。代理、白名单、时区、语言、默认替换开关与最终检查仍会正常执行。
+`s` 是幂等操作：开发机已有 Claude Code 时直接复用；远端 `cpm --version` 与当前管理器版本一致时，跳过 cpm 下载、校验和 SSH 上传。沙箱组件、代理、白名单、时区、语言、默认替换开关与最终检查仍会正常执行。
 
 ### macOS 安全浏览器
 
@@ -160,11 +161,11 @@ cpm proxy --check
 | 区域 | `TZ`、`LANG`、`LC_ALL`、`LC_CTYPE`、`LC_MESSAGES` |
 | 网络 | 开发机直连 IP、代理出口 IP、节点 IP 对比、Anthropic API |
 | 地理信息 | 国家、州/地区、城市、ISP/组织、IANA 时区、语言、数据来源 |
-| 启动 | `--no-chrome`、默认替换开关 |
+| 启动 | `--no-chrome`、默认替换开关、沙箱组件与 namespace 权限 |
 
 检查会实际完成 SOCKS5 认证、TLS 请求和 Anthropic API 连通性测试。错误行包含具体原因，不包含代理密码。
 
-正常执行 `cpm proxy` 或通过默认替换执行 `claude` 时，也会先自动运行并打印完整检查表。存在任何 `FAIL` 时停止启动 Claude；全部通过后才执行真实 Claude 二进制。
+正常执行 `cpm proxy` 或通过默认替换执行 `claude` 时，会先打印现有完整检查表，再创建沙箱并打印其中的路由、DNS、时区、主机名和出口检查。任一 `FAIL` 都会停止启动 Claude。
 
 ## Claude 运行环境
 
@@ -187,7 +188,11 @@ LC_MESSAGES=<同 LANG>
 CLAUDE_CONFIG_DIR=<可选的 Claude 状态目录>
 ```
 
-自动探测以 `ipapi.co` 为主，`ipwho.is` 为备用，结果按代理配置缓存 6 小时。时区与 locale 可以按机器显式填写，手动值优先。实时 API 失败时，即使缓存已经超过 6 小时，也会继续使用最后一次成功结果；只有从未生成过缓存时才回退到 `America/Los_Angeles` 和 `en_US.UTF-8`。IP 地理位置来自数据库估算，城市和 ISP 可能在不同供应商之间有差异。
+沙箱里的外部 TCP 连接都被重定向到本次 sidecar，沙箱内部的回环连接仍可供本地服务使用。DNS 查询返回会话内的合成地址，再由 sidecar 按域名执行白名单或 SOCKS5 转发。云元数据和宿主回环地址始终拒绝。IPv6 外网和非 DNS UDP 当前不可用，依赖它们的工具会报网络错误。
+
+项目、HOME 和开发机工具仍使用真实文件系统，Claude 修改的文件立即写回原位置。沙箱覆盖 `/etc/localtime`、`/etc/timezone`、主机名、DNS、进程表、云初始化目录以及 `/run`，不复制整个开发环境。对整个文件系统的读写权限也意味着进程可以通过其他宿主 socket 或可写文件间接影响沙箱外的程序；此模式不能提供完全隔绝宿主机的安全边界。
+
+自动探测以 `ipapi.co` 为主，`ipwho.is` 为备用，结果按代理配置缓存 6 小时。时区与 locale 可以按机器显式填写，手动值优先。实时 API 失败时，即使缓存已经超过 6 小时，也会继续使用最后一次成功结果；自动模式下从未生成缓存则停止启动。IP 地理位置来自数据库估算，城市和 ISP 可能在不同供应商之间有差异。
 
 bridge 只监听 `127.0.0.1`，SOCKS5 凭据从权限为 `0600` 的配置文件读取，不进入进程参数。
 
@@ -209,6 +214,7 @@ bridge 只监听 `127.0.0.1`，SOCKS5 凭据从权限为 `0600` 的配置文件�
 ~/.local/bin/claude
 ~/.config/cpm/proxy.env
 ~/.local/share/cpm/shim-bin/claude
+~/.local/share/cpm/native/usr/sbin/redsocks（开发机未预装时）
 ~/.local/state/cpm/bridge-17891.pid
 ~/.local/state/cpm/bridge-17891.log
 ~/.local/state/cpm/geolocation.json

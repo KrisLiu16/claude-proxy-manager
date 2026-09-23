@@ -46,6 +46,7 @@ printf '%s\n' "$command" >> "$CPM_SSH_LOG"
 case "$command" in
   'sh -s --') HOME="$CPM_REMOTE_HOME" PATH=/usr/bin:/bin /bin/sh -s -- ;;
   *'__remote-apply-config'*) cat >/dev/null ;;
+  *'__sandbox-prepare'*) cat >/dev/null; printf '%s\n' '/usr/sbin/redsocks' ;;
   *'__remote-toggle'*) cat >/dev/null ;;
   *'__remote-check'*) cat >/dev/null; printf '%s\n' '{"connected":true,"checks":[]}' ;;
   *) cat >/dev/null; exit 9 ;;

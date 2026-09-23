@@ -12,6 +12,7 @@ import {statusSummary} from './types.js';
 import {inspectProxyRuntime, readRuntimeConfig, resolvedRuntimeEnvironment, runBridge, runClaudeProxy, stopBridge} from './proxy-runtime.js';
 import {applyRemoteConfig, remoteStatus, toggleRemote} from './remote.js';
 import {VERSION} from './version.js';
+import {prepareLinuxSandbox, sandboxChild, sandboxInit} from './linux-sandbox.js';
 
 async function handleRuntimeMode(): Promise<boolean> {
 	const command = process.argv[2];
@@ -25,6 +26,18 @@ async function handleRuntimeMode(): Promise<boolean> {
 		const tokenIndex = process.argv.indexOf('--health-token');
 		if (configIndex < 0 || portIndex < 0 || tokenIndex < 0) throw new Error('bridge 参数缺失');
 		await runBridge(process.argv[configIndex + 1]!, Number(process.argv[portIndex + 1]), process.argv[tokenIndex + 1]!);
+		return true;
+	}
+	if (command === '__sandbox-prepare') {
+		process.stdout.write(`${await prepareLinuxSandbox()}\n`);
+		return true;
+	}
+	if (command === '__sandbox-init') {
+		process.exitCode = await sandboxInit(process.argv[3]!);
+		return true;
+	}
+	if (command === '__sandbox-child') {
+		process.exitCode = await sandboxChild(process.argv[3]!);
 		return true;
 	}
 	if (command === '__stop-bridge') {
