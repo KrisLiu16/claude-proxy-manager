@@ -8,8 +8,9 @@ import {startNetworkSidecar} from './network-sidecar.js';
 import {compareMachineFacts, imageRecipeForHost, machineFacts, parseOsRelease, type MachineFacts} from './host-baseline.js';
 import type {RuntimeConfig} from './proxy-runtime.js';
 import {VERSION} from './version.js';
-import {statusSummary, type CheckItem} from './types.js';
+import type {CheckItem} from './types.js';
 import {TerminalProgress} from './progress-display.js';
+import {CheckStream} from './check-stream.js';
 
 // Pin multi-architecture image indexes, so amd64 and arm64 use the same build recipe.
 const NODE_BUILD_IMAGE = 'node:24.20.0-bookworm-slim@sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e';
@@ -362,7 +363,9 @@ export async function runIsolatedContainer(config: RuntimeConfig, executable: st
 		comparison = await inspectImageCompatibility(image);
 		progress.update({percent: 100, label: '容器准备完成'});
 	} finally { progress.finish(); }
-	console.error(`CPM 宿主镜像对照\n${statusSummary({connected: true, checks: comparison})}\n`);
+	const comparisonStream = new CheckStream('CPM 宿主镜像对照', line => console.error(line));
+	for (const item of comparison) comparisonStream.row(item);
+	comparisonStream.finish();
 	if (comparison.some(item => item.state === 'FAIL')) throw new Error('宿主镜像对照未通过，已停止启动目标命令');
 	const directory = await mkdtemp(join(tmpdir(), 'cpm-egress-'));
 	let sidecar: Awaited<ReturnType<typeof startNetworkSidecar>> | undefined;

@@ -4,13 +4,13 @@ import {Command} from 'commander';
 import {render} from 'ink';
 import {App, type LaunchTarget} from './app.js';
 import {checkLocal, prepareLocal, readLocalSettings, setReplaceClaude} from './local-setup.js';
-import {statusSummary} from './types.js';
 import {readRuntimeConfig, resolvedRuntimeEnvironment, runBridge, runClaudeProxy, runGenericSandbox, stopBridge} from './proxy-runtime.js';
 import {ensureContainerImage, ensurePersistentVolumes, prepareDockerEngine} from './isolated-sandbox.js';
 import {runContainerCommand} from './container-relay.js';
 import {VERSION} from './version.js';
 import {machineFacts} from './host-baseline.js';
 import {TerminalProgress} from './progress-display.js';
+import {CheckStream} from './check-stream.js';
 
 async function runtimeMode(): Promise<boolean> {
 	const command = process.argv[2];
@@ -102,18 +102,25 @@ program.command('help [command]').description('查看 CPM 或某个命令的用�
 program.command('setup').description('在本机准备 Claude、Docker 镜像与持久工作区').action(async () => {
 	const started = Date.now();
 	const progress = new TerminalProgress('CPM 本机准备');
+	const stream = new CheckStream('CPM 本机设置检查', line => progress.line(line));
+	let rowsShown = false;
 	let image: string;
-	try { image = await prepareLocal(update => progress.update(update)); }
-	finally { progress.finish(); }
+	try { image = await prepareLocal(update => progress.update(update), item => { rowsShown = true; stream.row(item); }); }
+	finally { progress.finish(); if (rowsShown) stream.finish(); }
 	console.log(`就绪：${image}（${Math.round((Date.now() - started) / 1000)} 秒）`);
 });
 
-program.command('check').description('在本机逐项检查代理、容器隔离前提与持久卷').action(async () => {
+program.command('check').description('在本机逐项实时输出代理、容器隔离前提与持久卷结果').action(async () => {
 	const progress = new TerminalProgress('CPM 逐项检查');
+	const stream = new CheckStream('CPM 本机逐项检查', line => {
+		if (process.stdout.isTTY && process.stderr.isTTY) progress.line(line);
+		else process.stdout.write(`${line}\n`);
+	});
+	stream.start();
 	let rows: Awaited<ReturnType<typeof checkLocal>>;
-	try { rows = await checkLocal(update => progress.update(update)); }
-	finally { progress.finish(); }
-	console.log(statusSummary({connected: true, checks: rows}));
+	try { rows = await checkLocal(update => progress.update(update), item => stream.row(item)); }
+	catch (error) { stream.row({name: '本机检查异常', state: 'FAIL', value: (error as Error).message}); throw error; }
+	finally { progress.finish(); stream.finish(); }
 	if (rows.some(item => item.state === 'FAIL')) process.exitCode = 3;
 });
 

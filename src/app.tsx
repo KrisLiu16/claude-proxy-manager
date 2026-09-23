@@ -105,6 +105,20 @@ export function App({initial, platform = process.platform, onLaunch}: {initial: 
 		});
 	}
 
+	async function audit(): Promise<void> {
+		setMode('audit');
+		setChecks([]);
+		setRowIndex(0);
+		let nextIndex = 0;
+		await operation('逐项检查代理与隔离环境', async report => {
+			await checkLocal(report, item => {
+				setChecks(value => [...value, item]);
+				setRowIndex(nextIndex++);
+			});
+			return '逐项检查完成；↑/↓ 查看全部结果';
+		});
+	}
+
 	useInput((input, key) => {
 		if (busy) return;
 		if (mode === 'edit') {
@@ -119,7 +133,7 @@ export function App({initial, platform = process.platform, onLaunch}: {initial: 
 			if (key.escape || input === 'b') { setMode('home'); return; }
 			if (key.upArrow || input === 'k') { setRowIndex(value => Math.max(0, value - 1)); return; }
 			if (key.downArrow || input === 'j') { setRowIndex(value => Math.min(checks.length - 1, value + 1)); return; }
-			if (input === 'c' || input === 'r') { void operation('重新检查', async report => { setChecks(await checkLocal(report)); setRowIndex(0); return '逐项检查完成'; }); return; }
+			if (input === 'c' || input === 'r') { void audit(); return; }
 		}
 		if (mode === 'help' && (key.escape || input === 'b')) { setMode('home'); return; }
 		if (input === 'q' || key.ctrl && input === 'c') { exit(); return; }
@@ -130,12 +144,7 @@ export function App({initial, platform = process.platform, onLaunch}: {initial: 
 			setPrepared(true);
 			return `工作区已就绪 · ${image}`;
 		});
-		else if (input === 'c') void operation('逐项检查代理与隔离环境', async report => {
-			setChecks(await checkLocal(report));
-			setRowIndex(0);
-			setMode('audit');
-			return '逐项检查完成；↑/↓ 查看全部结果';
-		});
+		else if (input === 'c') void audit();
 		else if (input === 't') void operation('切换默认路由', async () => {
 			const enabled = !current.settings.replaceClaude;
 			await setReplaceClaude(enabled);

@@ -13,6 +13,7 @@ import {loadCachedGeo, lookupGeoProfile, saveCachedGeo, type GeoProfile} from '.
 import {inspectContainerPrerequisites, runIsolatedContainer} from './isolated-sandbox.js';
 import {pipeSockets} from './socket-pair.js';
 import {TerminalProgress, type CheckProgress} from './progress-display.js';
+import {CheckStream} from './check-stream.js';
 
 const DEFAULT_PORT = 17_891;
 const DEFAULT_TIMEZONE = 'auto';
@@ -502,34 +503,35 @@ async function currentBinaryMatches(): Promise<boolean> {
 	} catch { return false; }
 }
 
-export async function inspectProxyRuntime(target: 'claude' | 'generic' = 'claude', report?: (progress: CheckProgress) => void): Promise<CheckItem[]> {
+export async function inspectProxyRuntime(target: 'claude' | 'generic' = 'claude', report?: (progress: CheckProgress) => void, onRow?: (item: CheckItem) => void): Promise<CheckItem[]> {
 	const rows: CheckItem[] = [];
+	const add = (item: CheckItem) => { rows.push(item); onRow?.(item); };
 	report?.({percent: 2, label: '读取本机配置与 Claude 路径'});
 	const config = await readRuntimeConfig();
-	rows.push(row('cpm 运行时', await currentBinaryMatches() ? 'PASS' : 'INFO', VERSION, process.execPath));
+	add(row('cpm 运行时', await currentBinaryMatches() ? 'PASS' : 'INFO', VERSION, process.execPath));
 	try {
 		const mode = ((await import('node:fs/promises')).stat(configPath()).then(value => (value.mode & 0o777).toString(8)));
 		const actual = await mode;
-		rows.push(row('配置文件', actual === '600' ? 'PASS' : 'WARN', configPath(), `权限 ${actual}`));
-	} catch { rows.push(row('配置文件', 'FAIL', '缺失', configPath())); }
-	rows.push(row('Claude CLI', await executable(config.claudeBin) ? 'PASS' : 'FAIL', config.claudeBin || '未配置'));
+		add(row('配置文件', actual === '600' ? 'PASS' : 'WARN', configPath(), `权限 ${actual}`));
+	} catch { add(row('配置文件', 'FAIL', '缺失', configPath())); }
+	add(row('Claude CLI', await executable(config.claudeBin) ? 'PASS' : 'FAIL', config.claudeBin || '未配置'));
 	let parsed: URL | undefined;
 	try {
 		parsed = parseProxy(config.proxyUrl);
-		rows.push(row('SOCKS5 配置', parsed.protocol === 'socks5h:' ? 'PASS' : 'WARN', `${parsed.hostname}:${parsed.port}`, parsed.protocol === 'socks5h:' ? '远端 DNS' : '建议使用 socks5h'));
-	} catch (error) { rows.push(row('SOCKS5 配置', 'FAIL', (error as Error).message)); }
+		add(row('SOCKS5 配置', parsed.protocol === 'socks5h:' ? 'PASS' : 'WARN', `${parsed.hostname}:${parsed.port}`, parsed.protocol === 'socks5h:' ? '远端 DNS' : '建议使用 socks5h'));
+	} catch (error) { add(row('SOCKS5 配置', 'FAIL', (error as Error).message)); }
 	if (parsed) {
 		report?.({percent: 14, label: '连接代理网关 TCP'});
-		try { const tcp = await connectTcp(parsed.hostname.replace(/^\[|\]$/g, ''), Number(parsed.port)); tcp.destroy(); rows.push(row('代理网关 TCP', 'PASS', `${parsed.hostname}:${parsed.port}`)); }
-		catch (error) { rows.push(row('代理网关 TCP', 'FAIL', `${parsed.hostname}:${parsed.port}`, (error as Error).message)); }
+		try { const tcp = await connectTcp(parsed.hostname.replace(/^\[|\]$/g, ''), Number(parsed.port)); tcp.destroy(); add(row('代理网关 TCP', 'PASS', `${parsed.hostname}:${parsed.port}`)); }
+		catch (error) { add(row('代理网关 TCP', 'FAIL', `${parsed.hostname}:${parsed.port}`, (error as Error).message)); }
 		report?.({percent: 27, label: '验证 SOCKS5 认证与远端 DNS'});
-		try { const socks = await socksConnect(config.proxyUrl, 'api.ipify.org', 443); socks.destroy(); rows.push(row('SOCKS5 认证', 'PASS', '通过')); }
-		catch (error) { rows.push(row('SOCKS5 认证', 'FAIL', '失败', (error as Error).message)); }
+		try { const socks = await socksConnect(config.proxyUrl, 'api.ipify.org', 443); socks.destroy(); add(row('SOCKS5 认证', 'PASS', '通过')); }
+		catch (error) { add(row('SOCKS5 认证', 'FAIL', '失败', (error as Error).message)); }
 	}
 	let bridgeReady = false;
 	report?.({percent: 38, label: '检查本机 HTTP bridge'});
-	try { await ensureBridge(config); bridgeReady = true; rows.push(row('内置 HTTP bridge', 'PASS', `127.0.0.1:${config.httpPort}`)); }
-	catch (error) { rows.push(row('内置 HTTP bridge', 'FAIL', '不可用', (error as Error).message)); }
+	try { await ensureBridge(config); bridgeReady = true; add(row('内置 HTTP bridge', 'PASS', `127.0.0.1:${config.httpPort}`)); }
+	catch (error) { add(row('内置 HTTP bridge', 'FAIL', '不可用', (error as Error).message)); }
 	let exitIp = '';
 	let exitError = '';
 	if (parsed && bridgeReady) {
@@ -552,50 +554,50 @@ export async function inspectProxyRuntime(target: 'claude' | 'generic' = 'claude
 	report?.({percent: 78, label: '核对环境变量和地区设置'});
 	const env = proxyEnvironment(resolved);
 	const proxy = `http://127.0.0.1:${config.httpPort}`;
-	for (const name of ['ALL_PROXY', 'all_proxy', 'HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy'] as const) rows.push(row(name, env[name] === proxy ? 'PASS' : 'FAIL', env[name] || '<空>'));
-	for (const name of ['NO_PROXY', 'no_proxy'] as const) rows.push(row(name, env[name] === config.noProxy ? 'PASS' : 'FAIL', env[name] || '<空>'));
-	rows.push(row('TZ', resolution.error && config.timezone === 'auto' ? resolution.geo ? 'WARN' : 'FAIL' : env.TZ === resolved.timezone ? 'PASS' : 'FAIL', env.TZ || '<空>', config.timezone === 'auto' ? '自动注入' : '手动配置'));
+	for (const name of ['ALL_PROXY', 'all_proxy', 'HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy'] as const) add(row(name, env[name] === proxy ? 'PASS' : 'FAIL', env[name] || '<空>'));
+	for (const name of ['NO_PROXY', 'no_proxy'] as const) add(row(name, env[name] === config.noProxy ? 'PASS' : 'FAIL', env[name] || '<空>'));
+	add(row('TZ', resolution.error && config.timezone === 'auto' ? resolution.geo ? 'WARN' : 'FAIL' : env.TZ === resolved.timezone ? 'PASS' : 'FAIL', env.TZ || '<空>', config.timezone === 'auto' ? '自动注入' : '手动配置'));
 	try {
 		const now = new Date();
 		const short = new Intl.DateTimeFormat('en-US', {timeZone: resolved.timezone, timeZoneName: 'short'}).formatToParts(now).find(part => part.type === 'timeZoneName')?.value;
 		const offset = new Intl.DateTimeFormat('en-US', {timeZone: resolved.timezone, timeZoneName: 'shortOffset'}).formatToParts(now).find(part => part.type === 'timeZoneName')?.value;
-		rows.push(row('时区实际值', 'PASS', [short, offset].filter(Boolean).join(' ')));
-	} catch (error) { rows.push(row('时区实际值', 'FAIL', '无效时区', (error as Error).message)); }
-	for (const name of ['LANG', 'LC_ALL', 'LC_CTYPE', 'LC_MESSAGES'] as const) rows.push(row(name, resolution.error && config.locale === 'auto' ? resolution.geo ? 'WARN' : 'FAIL' : env[name] === resolved.locale ? 'PASS' : 'FAIL', env[name] || '<空>', config.locale === 'auto' ? '自动注入' : '手动配置'));
-	rows.push(row('CLAUDE_CONFIG_DIR', 'INFO', '<容器专属 HOME>', '不挂入宿主 Claude 状态'));
+		add(row('时区实际值', 'PASS', [short, offset].filter(Boolean).join(' ')));
+	} catch (error) { add(row('时区实际值', 'FAIL', '无效时区', (error as Error).message)); }
+	for (const name of ['LANG', 'LC_ALL', 'LC_CTYPE', 'LC_MESSAGES'] as const) add(row(name, resolution.error && config.locale === 'auto' ? resolution.geo ? 'WARN' : 'FAIL' : env[name] === resolved.locale ? 'PASS' : 'FAIL', env[name] || '<空>', config.locale === 'auto' ? '自动注入' : '手动配置'));
+	add(row('CLAUDE_CONFIG_DIR', 'INFO', '<容器专属 HOME>', '不挂入宿主 Claude 状态'));
 	if (resolution.geo) {
 		const geo = resolution.geo;
 		const geoDetail = resolution.error
 			? `实时失败，复用旧缓存：${resolution.error}`
 			: resolution.cached ? '缓存' : '实时';
-		rows.push(row('地理信息 API', resolution.error ? 'WARN' : 'PASS', geo.source, geoDetail));
-		rows.push(row('IP 归属国家', geo.country ? 'PASS' : 'WARN', [geo.country, geo.countryCode].filter(Boolean).join(' / ') || '<未知>'));
-		rows.push(row('州/地区', geo.region ? 'PASS' : 'WARN', geo.region || '<未知>'));
-		rows.push(row('城市', geo.city ? 'PASS' : 'WARN', geo.city || '<未知>'));
-		rows.push(row('ISP/组织', geo.isp ? 'PASS' : 'WARN', geo.isp || '<未知>'));
-		rows.push(row('ASN', geo.asn ? 'PASS' : 'INFO', geo.asn || '<未知>'));
-		rows.push(row('探测时区', geo.timezone ? 'PASS' : 'WARN', geo.timezone || '<未知>'));
-		rows.push(row('探测语言', geo.languages ? 'PASS' : 'INFO', geo.languages || '<API 未提供>', `locale=${geo.locale}`));
+		add(row('地理信息 API', resolution.error ? 'WARN' : 'PASS', geo.source, geoDetail));
+		add(row('IP 归属国家', geo.country ? 'PASS' : 'WARN', [geo.country, geo.countryCode].filter(Boolean).join(' / ') || '<未知>'));
+		add(row('州/地区', geo.region ? 'PASS' : 'WARN', geo.region || '<未知>'));
+		add(row('城市', geo.city ? 'PASS' : 'WARN', geo.city || '<未知>'));
+		add(row('ISP/组织', geo.isp ? 'PASS' : 'WARN', geo.isp || '<未知>'));
+		add(row('ASN', geo.asn ? 'PASS' : 'INFO', geo.asn || '<未知>'));
+		add(row('探测时区', geo.timezone ? 'PASS' : 'WARN', geo.timezone || '<未知>'));
+		add(row('探测语言', geo.languages ? 'PASS' : 'INFO', geo.languages || '<API 未提供>', `locale=${geo.locale}`));
 	} else {
-		rows.push(row('地理信息 API', config.timezone === 'auto' || config.locale === 'auto' ? 'FAIL' : 'WARN', '探测失败', resolution.error || '没有返回数据'));
+		add(row('地理信息 API', config.timezone === 'auto' || config.locale === 'auto' ? 'FAIL' : 'WARN', '探测失败', resolution.error || '没有返回数据'));
 	}
-	rows.push(row('DNS 模式', parsed?.protocol === 'socks5h:' ? 'PASS' : 'WARN', parsed?.protocol === 'socks5h:' ? 'SOCKS5H 远端解析' : '非远端解析'));
-	rows.push(row('开发机直连 IP', 'INFO', '未探测', '启动检查不从宿主机直连外网'));
+	add(row('DNS 模式', parsed?.protocol === 'socks5h:' ? 'PASS' : 'WARN', parsed?.protocol === 'socks5h:' ? 'SOCKS5H 远端解析' : '非远端解析'));
+	add(row('开发机直连 IP', 'INFO', '未探测', '启动检查不从宿主机直连外网'));
 	if (parsed) {
 		if (exitIp) {
 			const ip = exitIp;
-			rows.push(row('代理出口 IP', 'PASS', ip));
+			add(row('代理出口 IP', 'PASS', ip));
 			const endpoint = parsed.hostname;
 			const isAddress = net.isIP(endpoint) > 0;
-			rows.push(row('出口与节点 IP', !isAddress ? 'INFO' : ip === endpoint ? 'PASS' : 'WARN', !isAddress ? '节点使用域名' : ip === endpoint ? '一致' : '不一致', isAddress && ip !== endpoint ? `${endpoint} → ${ip}` : ''));
-		} else rows.push(row('代理出口 IP', 'FAIL', '获取失败', exitError || 'bridge 不可用'));
+			add(row('出口与节点 IP', !isAddress ? 'INFO' : ip === endpoint ? 'PASS' : 'WARN', !isAddress ? '节点使用域名' : ip === endpoint ? '一致' : '不一致', isAddress && ip !== endpoint ? `${endpoint} → ${ip}` : ''));
+		} else add(row('代理出口 IP', 'FAIL', '获取失败', exitError || 'bridge 不可用'));
 		if (target === 'claude') {
 			report?.({percent: 90, label: '验证 Anthropic API 连通性'});
 			try {
 				const result = await bridgedHttps(config.httpPort, 'api.anthropic.com', '/v1/messages');
-				rows.push(row('Anthropic API', HTTP_OK.has(result.status) ? 'PASS' : 'FAIL', `HTTP ${result.status}`));
-			} catch (error) { rows.push(row('Anthropic API', 'FAIL', '不可达', (error as Error).message)); }
-		} else rows.push(row('Anthropic API', 'SKIP', '非 Claude 命令'));
+				add(row('Anthropic API', HTTP_OK.has(result.status) ? 'PASS' : 'FAIL', `HTTP ${result.status}`));
+			} catch (error) { add(row('Anthropic API', 'FAIL', '不可达', (error as Error).message)); }
+		} else add(row('Anthropic API', 'SKIP', '非 Claude 命令'));
 	}
 	report?.({percent: 100, label: '代理检查完成'});
 	return rows;
@@ -614,24 +616,37 @@ export async function runProxyPreflight(
 	return !rows.some(item => item.state === 'FAIL');
 }
 
+async function inspectWithStreaming(target: 'claude' | 'generic', title: string, explicitCheck = false): Promise<CheckItem[]> {
+	const progress = new TerminalProgress('CPM 启动检查');
+	const stream = new CheckStream(title, line => {
+		if (explicitCheck && !(process.stdout.isTTY && process.stderr.isTTY)) process.stdout.write(`${line}\n`);
+		else progress.line(line);
+	});
+	stream.start();
+	try {
+		const proxyRows = await inspectProxyRuntime(target, update => progress.update({...update, percent: Math.round(update.percent * 0.9)}), item => stream.row(item));
+		progress.update({percent: 94, label: '检查 Docker、seccomp 与 AppArmor'});
+		const dockerRows = await inspectContainerPrerequisites();
+		for (const item of dockerRows) stream.row(item);
+		progress.update({percent: 100, label: '启动前检查完成'});
+		progress.finish();
+		stream.finish();
+		return [...proxyRows, ...dockerRows];
+	} catch (error) {
+		progress.finish();
+		stream.row({name: '启动检查异常', state: 'FAIL', value: (error as Error).message});
+		stream.finish();
+		throw error;
+	} finally { progress.finish(); }
+}
+
 async function runSandboxTarget(command: string, args: string[]): Promise<number> {
 	const config = await readRuntimeConfig();
 	parseProxy(config.proxyUrl);
 	if (!await executable(config.claudeBin)) throw new Error(`Claude CLI 不存在：${config.claudeBin || '<未配置>'}`);
-	let exitIp = '';
-	const progress = new TerminalProgress('CPM 启动检查');
-	let passed: boolean;
-	try {
-		passed = await runProxyPreflight(async () => {
-			const proxyRows = await inspectProxyRuntime(command === 'claude' ? 'claude' : 'generic', update => progress.update({...update, percent: Math.round(update.percent * 0.9)}));
-			progress.update({percent: 94, label: '检查 Docker、seccomp 与 AppArmor'});
-			const rows = [...proxyRows, ...await inspectContainerPrerequisites()];
-			exitIp = rows.find(item => item.name === '代理出口 IP' && item.state === 'PASS')?.value || '';
-			progress.update({percent: 100, label: '启动前检查完成'});
-			return rows;
-		}, output => { progress.finish(); process.stderr.write(output); });
-	} finally { progress.finish(); }
-	if (!passed) {
+	const rows = await inspectWithStreaming(command === 'claude' ? 'claude' : 'generic', 'CPM 启动前检查');
+	const exitIp = rows.find(item => item.name === '代理出口 IP' && item.state === 'PASS')?.value || '';
+	if (rows.some(item => item.state === 'FAIL')) {
 		console.error('cpm: 启动前检查存在 FAIL，已停止启动目标命令');
 		return 3;
 	}
@@ -647,14 +662,7 @@ async function runSandboxTarget(command: string, args: string[]): Promise<number
 
 export async function runClaudeProxy(args: string[]): Promise<number> {
 	if (args[0] === '--check' || args[0] === 'check') {
-		const progress = new TerminalProgress('CPM 逐项检查');
-		let rows: CheckItem[];
-		try {
-			const proxyRows = await inspectProxyRuntime('claude', update => progress.update({...update, percent: Math.round(update.percent * 0.9)}));
-			progress.update({percent: 94, label: '检查 Docker、seccomp 与 AppArmor'});
-			rows = [...proxyRows, ...await inspectContainerPrerequisites()];
-		} finally { progress.finish(); }
-		console.log(formatCheckTable(rows));
+		const rows = await inspectWithStreaming('claude', 'CPM Claude 逐项检查', true);
 		return rows.some(item => item.state === 'FAIL') ? 3 : 0;
 	}
 	if (args[0] === '--stop-bridge') { await stopBridge((await readRuntimeConfig()).httpPort); return 0; }

@@ -30,12 +30,20 @@ function pad(value: string, width: number): string {
 	return value + ' '.repeat(Math.max(0, width - displayWidth(value)));
 }
 
+export function checkHeader(width = 24): string {
+	return `${pad('检查项', width)}  状态    结果\n${'─'.repeat(width)}  ──────  ${'─'.repeat(42)}`;
+}
+
+export function checkLine(item: CheckItem, width = 24): string {
+	const state = item.state === 'PASS' ? 'OK' : item.state;
+	return `${pad(item.name, width)}  ${state.padEnd(6)}  ${item.value}${item.detail ? ` (${item.detail})` : ''}`;
+}
+
 export function statusSummary(status: RemoteStatus): string {
 	const nameWidth = Math.max(displayWidth('检查项'), ...status.checks.map(item => displayWidth(item.name)));
-	const lines = [`${pad('检查项', nameWidth)}  状态    结果`, `${'─'.repeat(nameWidth)}  ──────  ${'─'.repeat(42)}`];
+	const lines = checkHeader(nameWidth).split('\n');
 	for (const item of status.checks) {
-		const state = item.state === 'PASS' ? 'OK' : item.state;
-		lines.push(`${pad(item.name, nameWidth)}  ${state.padEnd(6)}  ${item.value}${item.detail ? ` (${item.detail})` : ''}`);
+		lines.push(checkLine(item, nameWidth));
 	}
 	return lines.join('\n');
 }

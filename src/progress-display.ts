@@ -50,6 +50,12 @@ export class TerminalProgress {
 		this.drew = true;
 	}
 
+	public line(value: string): void {
+		if (this.stream.isTTY && this.drew && !this.finished) this.stream.write('\r\x1b[2K');
+		this.stream.write(`${value}\n`);
+		if (this.stream.isTTY && this.drew && !this.finished) this.draw();
+	}
+
 	public finish(): void {
 		if (this.finished) return;
 		this.finished = true;

@@ -14,7 +14,7 @@ cpm check           # 逐项检查；解决 FAIL 后再使用
 cpm enter           # 在 /workspace 打开交互式 bash
 ```
 
-安装器从 [GitHub Releases](https://github.com/KrisLiu16/claude-proxy-manager/releases) 下载当前平台的 CPM 单文件程序，校验 SHA-256，默认放到 `~/.local/bin/cpm`。`CPM_VERSION=v0.10.1` 可固定版本；`CPM_INSTALL_DIR` 可指定目录。升级时会先停止旧的宿主代理 bridge，新启动的命令会使用新版本；已经运行的容器不会被中断。独立容器目前只支持 Linux，且要求 Docker Engine、seccomp、AppArmor 和普通用户。Ubuntu/Debian 缺少 Docker 时，`cpm setup` 会尝试使用免密 sudo 安装并启动它；其他发行版需要先自行安装 Docker。
+安装器从 [GitHub Releases](https://github.com/KrisLiu16/claude-proxy-manager/releases) 下载当前平台的 CPM 单文件程序，校验 SHA-256，默认放到 `~/.local/bin/cpm`。`CPM_VERSION=v0.10.2` 可固定版本；`CPM_INSTALL_DIR` 可指定目录。升级时会先停止旧的宿主代理 bridge，新启动的命令会使用新版本；已经运行的容器不会被中断。独立容器目前只支持 Linux，且要求 Docker Engine、seccomp、AppArmor 和普通用户。Ubuntu/Debian 缺少 Docker 时，`cpm setup` 会尝试使用免密 sudo 安装并启动它；其他发行版需要先自行安装 Docker。
 
 首次构建镜像会读取宿主 `/etc/os-release` 选择基础镜像，并安装 Git、Python、bubblewrap 等开发工具，可能需要几分钟。Ubuntu 和 Debian 宿主使用对应发行版与版本的基础镜像；其他发行版继续使用 Ubuntu 24.04 基础镜像，并在宿主对照中显示差异。后续同版本、同区域配置和相同 Claude 二进制会复用镜像。已有官方 Claude 二进制会直接复用；缺少时，CPM 从官方 npm 平台包下载并验证 SHA-512，再安装到本机 `~/.local/bin/claude`。Codex 首次运行时会在容器 HOME 中安装，其状态随后持久保存。首次登录 Codex 时，CPM 会启动设备码流程，由用户在自己的浏览器完成验证；隔离容器无法接收普通浏览器流程的 localhost OAuth 回调。设备码登录需要在账户或工作区中启用，详见 [OpenAI Codex 登录说明](https://learn.chatgpt.com/docs/auth)。
 
@@ -61,7 +61,7 @@ cpm disable                   # 关闭默认路由
 
 每次启动目标命令前，CPM 会对照宿主与镜像的发行版、内核、架构、UID/GID、Node、Python、Git 和 bubblewrap，再在容器内验证直连阻断、DNS、时区、主机名、权限和实际代理出口。任何 `FAIL` 都会阻止目标程序运行；工具补丁版本差异显示为 `WARN`。`cpm proxy codex` 等非 Claude 命令不会要求 Anthropic API 连通。`cpm check` 在**当前机器**执行，不连接 SSH。
 
-代理检查、镜像准备和宿主对照会显示当前阶段与已用时间；交互式终端使用单行实时更新，重定向输出时每个阶段打印一次，并每隔约 5 秒报告仍在等待。
+每个检查项完成时立即输出一行 `OK/WARN/FAIL`；TUI 也会同步填入检查列表。网络请求等待期间继续显示当前阶段与已用时间，最后只打印计数摘要。交互式终端使用单行进度提示；重定向输出时每个阶段打印一次，并每隔约 5 秒报告仍在等待。
 
 ## 文件与进程生命周期
 
