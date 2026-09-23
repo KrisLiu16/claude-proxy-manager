@@ -245,6 +245,7 @@ export async function prepareLocal(report?: ProgressReporter, onRow?: (item: Che
 	});
 	update(95, '逐项对照宿主系统与新镜像');
 	const comparison = await inspectImageCompatibility(image);
+	for (const item of comparison) onRow?.(item);
 	const mismatch = comparison.find(item => item.state === 'FAIL');
 	if (mismatch) throw new Error(`${mismatch.name}：${mismatch.value}`);
 	update(100, '独立工作区已就绪');

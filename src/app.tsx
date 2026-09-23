@@ -139,11 +139,20 @@ export function App({initial, platform = process.platform, onLaunch}: {initial: 
 		if (input === 'q' || key.ctrl && input === 'c') { exit(); return; }
 		if (mode !== 'home') return;
 		if (input === 'e') openEditor();
-		else if (input === 's') void operation('准备本机隔离工作区', async report => {
-			const image = await prepareLocal(report);
-			setPrepared(true);
-			return `工作区已就绪 · ${image}`;
-		});
+		else if (input === 's') {
+			setMode('audit');
+			setChecks([]);
+			setRowIndex(0);
+			let nextIndex = 0;
+			void operation('准备本机隔离工作区', async report => {
+				const image = await prepareLocal(report, item => {
+					setChecks(value => [...value, item]);
+					setRowIndex(nextIndex++);
+				});
+				setPrepared(true);
+				return `工作区已就绪 · ${image}`;
+			});
+		}
 		else if (input === 'c') void audit();
 		else if (input === 't') void operation('切换默认路由', async () => {
 			const enabled = !current.settings.replaceClaude;
