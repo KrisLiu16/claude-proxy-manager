@@ -10,7 +10,7 @@ import {domainToASCII} from 'node:url';
 import {statusSummary, type CheckItem, type CheckState} from './types.js';
 import {VERSION} from './version.js';
 import {loadCachedGeo, lookupGeoProfile, saveCachedGeo, type GeoProfile} from './geolocation.js';
-import {inspectSandboxPrerequisites, runInLinuxSandbox} from './linux-sandbox.js';
+import {inspectContainerPrerequisites, runIsolatedContainer} from './isolated-sandbox.js';
 
 const DEFAULT_PORT = 17_891;
 const DEFAULT_TIMEZONE = 'auto';
@@ -214,7 +214,7 @@ async function httpProxyConnect(port: number, targetHost: string, targetPort: nu
 	});
 }
 
-async function bridgedHttps(port: number, host: string, path: string): Promise<HttpResult> {
+export async function bridgedHttps(port: number, host: string, path: string): Promise<HttpResult> {
 	return httpsRequest(host, path, await httpProxyConnect(port, host, 443));
 }
 
@@ -557,7 +557,7 @@ async function currentBinaryMatches(): Promise<boolean> {
 	} catch { return false; }
 }
 
-export async function inspectProxyRuntime(): Promise<CheckItem[]> {
+export async function inspectProxyRuntime(target: 'claude' | 'generic' = 'claude'): Promise<CheckItem[]> {
 	const rows: CheckItem[] = [];
 	const config = await readRuntimeConfig();
 	rows.push(row('cpm 运行时', await currentBinaryMatches() ? 'PASS' : 'INFO', VERSION, process.execPath));
@@ -610,7 +610,7 @@ export async function inspectProxyRuntime(): Promise<CheckItem[]> {
 		rows.push(row('时区实际值', 'PASS', [short, offset].filter(Boolean).join(' ')));
 	} catch (error) { rows.push(row('时区实际值', 'FAIL', '无效时区', (error as Error).message)); }
 	for (const name of ['LANG', 'LC_ALL', 'LC_CTYPE', 'LC_MESSAGES'] as const) rows.push(row(name, resolution.error && config.locale === 'auto' ? resolution.geo ? 'WARN' : 'FAIL' : env[name] === resolved.locale ? 'PASS' : 'FAIL', env[name] || '<空>', config.locale === 'auto' ? '自动注入' : '手动配置'));
-	rows.push(row('CLAUDE_CONFIG_DIR', config.claudeConfigDir && env.CLAUDE_CONFIG_DIR === config.claudeConfigDir ? 'PASS' : 'INFO', config.claudeConfigDir || '<Claude 默认目录>'));
+	rows.push(row('CLAUDE_CONFIG_DIR', 'INFO', '<容器专属 HOME>', '不挂入宿主 Claude 状态'));
 	if (resolution.geo) {
 		const geo = resolution.geo;
 		const geoDetail = resolution.error
@@ -638,10 +638,12 @@ export async function inspectProxyRuntime(): Promise<CheckItem[]> {
 			const isAddress = net.isIP(endpoint) > 0;
 			rows.push(row('出口与节点 IP', !isAddress ? 'INFO' : ip === endpoint ? 'PASS' : 'WARN', !isAddress ? '节点使用域名' : ip === endpoint ? '一致' : '不一致', isAddress && ip !== endpoint ? `${endpoint} → ${ip}` : ''));
 		} else rows.push(row('代理出口 IP', 'FAIL', '获取失败', exitError || 'bridge 不可用'));
-		try {
-			const result = await bridgedHttps(config.httpPort, 'api.anthropic.com', '/v1/messages');
-			rows.push(row('Anthropic API', HTTP_OK.has(result.status) ? 'PASS' : 'FAIL', `HTTP ${result.status}`));
-		} catch (error) { rows.push(row('Anthropic API', 'FAIL', '不可达', (error as Error).message)); }
+		if (target === 'claude') {
+			try {
+				const result = await bridgedHttps(config.httpPort, 'api.anthropic.com', '/v1/messages');
+				rows.push(row('Anthropic API', HTTP_OK.has(result.status) ? 'PASS' : 'FAIL', `HTTP ${result.status}`));
+			} catch (error) { rows.push(row('Anthropic API', 'FAIL', '不可达', (error as Error).message)); }
+		} else rows.push(row('Anthropic API', 'SKIP', '非 Claude 命令'));
 	}
 	return rows;
 }
@@ -659,19 +661,13 @@ export async function runProxyPreflight(
 	return !rows.some(item => item.state === 'FAIL');
 }
 
-export async function runClaudeProxy(args: string[]): Promise<number> {
+async function runSandboxTarget(command: string, args: string[]): Promise<number> {
 	const config = await readRuntimeConfig();
 	parseProxy(config.proxyUrl);
 	if (!await executable(config.claudeBin)) throw new Error(`Claude CLI 不存在：${config.claudeBin || '<未配置>'}`);
-	if (args[0] === '--check' || args[0] === 'check') {
-		const rows = [...await inspectProxyRuntime(), ...await inspectSandboxPrerequisites()];
-		console.log(formatCheckTable(rows));
-		return rows.some(item => item.state === 'FAIL') ? 3 : 0;
-	}
-	if (args[0] === '--stop-bridge') { await stopBridge(config.httpPort); return 0; }
 	let exitIp = '';
 	if (!await runProxyPreflight(async () => {
-		const rows = [...await inspectProxyRuntime(), ...await inspectSandboxPrerequisites()];
+		const rows = [...await inspectProxyRuntime(command === 'claude' ? 'claude' : 'generic'), ...await inspectContainerPrerequisites()];
 		exitIp = rows.find(item => item.name === '代理出口 IP' && item.state === 'PASS')?.value || '';
 		return rows;
 	})) {
@@ -685,5 +681,35 @@ export async function runClaudeProxy(args: string[]): Promise<number> {
 			? `cpm: IP 地理信息实时探测失败，复用上次缓存：${resolution.error}`
 				: `cpm: IP 地理信息探测失败且没有缓存：${resolution.error}`);
 	}
-	return await runInLinuxSandbox(resolution.config, args, exitIp);
+	return await runIsolatedContainer(resolution.config, command, args, exitIp);
+}
+
+export async function runClaudeProxy(args: string[]): Promise<number> {
+	if (args[0] === '--check' || args[0] === 'check') {
+		const rows = [...await inspectProxyRuntime(), ...await inspectContainerPrerequisites()];
+		console.log(formatCheckTable(rows));
+		return rows.some(item => item.state === 'FAIL') ? 3 : 0;
+	}
+	if (args[0] === '--stop-bridge') { await stopBridge((await readRuntimeConfig()).httpPort); return 0; }
+	const target = proxyTarget(args);
+	return runSandboxTarget(target.command, target.args);
+}
+
+export async function runGenericSandbox(args: string[]): Promise<number> {
+	const target = genericTarget(args);
+	return runSandboxTarget(target.command, target.args);
+}
+
+export function proxyTarget(args: string[]): {command: string; args: string[]} {
+	if (args[0] === '--') {
+		if (!args[1]) throw new Error('cpm proxy -- 后需要指定命令');
+		return {command: args[1], args: args.slice(2)};
+	}
+	if (args[0] === 'codex' || args[0] === 'claude') return {command: args[0], args: args.slice(1)};
+	return {command: 'claude', args};
+}
+
+export function genericTarget(args: string[]): {command: string; args: string[]} {
+	const values = args[0] === '--' ? args.slice(1) : args;
+	return {command: values[0] || 'claude', args: values.slice(1)};
 }

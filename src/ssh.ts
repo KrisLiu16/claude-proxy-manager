@@ -237,8 +237,6 @@ export class SSHClient {
 		if (!platform) throw new Error('无法识别远端平台');
 		if (probe.get('cpm_path') && probe.get('cpm_version') === VERSION) {
 			report(reporter, 64, `远端 cpm ${VERSION} 已是当前版本，跳过下载和上传`);
-			report(reporter, 75, '正在确认开发机沙箱组件');
-			await this.run(host.sshHost, 'exec "$HOME/.local/bin/cpm" __sandbox-prepare', '', 180_000);
 			report(reporter, 100, 'Claude 与 cpm 运行时已就绪');
 			return;
 		}
@@ -247,8 +245,6 @@ export class SSHClient {
 		try {
 			report(reporter, 78, '正在通过 SSH 上传并校验 cpm');
 			await this.runFile(host.sshHost, `sh -c ${shellQuote(installRuntimeScript)}`, runtime.binaryPath, 10 * 60_000, transferReporter(reporter, 78, 98, '正在通过 SSH 上传 cpm'));
-			report(reporter, 99, '正在准备开发机沙箱组件');
-			await this.run(host.sshHost, 'exec "$HOME/.local/bin/cpm" __sandbox-prepare', '', 180_000);
 			report(reporter, 100, 'Claude 与 cpm 运行时已就绪');
 		}
 		finally { await runtime.cleanup(); }
@@ -285,7 +281,6 @@ export class SSHClient {
 			`NO_PROXY=${host.noProxy.join(',')}`,
 			'TZ=' + host.timezone,
 			'LANG=' + host.locale,
-			...(host.claudeConfigDir ? ['CLAUDE_CONFIG_DIR=' + host.claudeConfigDir] : []),
 			'HTTP_PORT=17891',
 			'',
 		].join('\n');
@@ -300,6 +295,12 @@ export class SSHClient {
 		await this.installSteps(host, scoped(reporter, 0, 70));
 		report(reporter, 76, '正在写入代理、白名单、时区和语言配置');
 		await this.applyConfig(host, password);
+		report(reporter, 81, '正在构建独立开发容器（首次可能需要数分钟）');
+		const imageStarted = Date.now();
+		const imageProgress = setInterval(() => report(reporter, 81, `正在构建独立开发容器 ${Math.round((Date.now() - imageStarted) / 1_000)}s`), 5_000);
+		imageProgress.unref();
+		try { await this.run(host.sshHost, 'exec "$HOME/.local/bin/cpm" __container-prepare', '', 15 * 60_000); }
+		finally { clearInterval(imageProgress); }
 		report(reporter, 84, `正在${host.replaceClaude ? '开启' : '关闭'} claude → cpm proxy`);
 		await this.setReplaceClaude(host, host.replaceClaude);
 		report(reporter, 90, '正在验证代理出口和完整运行环境');

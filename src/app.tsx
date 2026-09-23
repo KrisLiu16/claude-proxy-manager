@@ -31,7 +31,7 @@ type FormState = {
 	replaceClaude: boolean;
 };
 
-const fieldNames = ['name', 'sshHost', 'proxySpec', 'proxyHost', 'proxyPort', 'proxyUser', 'password', 'noProxy', 'timezone', 'locale', 'claudeConfigDir'] as const;
+const fieldNames = ['name', 'sshHost', 'proxySpec', 'proxyHost', 'proxyPort', 'proxyUser', 'password', 'noProxy', 'timezone', 'locale'] as const;
 type FieldName = (typeof fieldNames)[number];
 
 const labels: Record<FieldName, string> = {
@@ -45,7 +45,6 @@ const labels: Record<FieldName, string> = {
 	noProxy: 'NO_PROXY（逗号分隔）',
 	timezone: 'Claude 进程时区（auto 自动）',
 	locale: 'Claude 进程 locale（auto 自动）',
-	claudeConfigDir: 'CLAUDE_CONFIG_DIR（可选）',
 };
 
 function emptyForm(): FormState {

@@ -110,7 +110,14 @@ class Reader {
 		socket.on('error', this.onError);
 		socket.on('end', this.onEnd);
 	}
-	private readonly onData = (data: Buffer) => { this.pending = Buffer.concat([this.pending, data]); this.wake?.(); };
+	private readonly onData = (data: Buffer) => {
+		if (this.pending.length + data.length > 1_048_576) {
+			this.socket.destroy(new Error('SOCKS 握手数据过大'));
+			return;
+		}
+		this.pending = Buffer.concat([this.pending, data]);
+		this.wake?.();
+	};
 	private readonly onError = (error: Error) => { this.error = error; this.wake?.(); };
 	private readonly onEnd = () => { this.error = new Error('SOCKS 客户端提前断开'); this.wake?.(); };
 	public async read(length: number): Promise<Buffer> {
@@ -146,6 +153,7 @@ async function directTcp(host: string, port: number): Promise<Socket> {
 
 async function handleSocks(client: Socket, config: RuntimeConfig, dns: SyntheticDns): Promise<void> {
 	const reader = new Reader(client);
+	client.setTimeout(20_000, () => client.destroy(new Error('SOCKS 握手超时')));
 	let upstream: Socket | undefined;
 	try {
 		const hello = await reader.read(2);
@@ -170,6 +178,7 @@ async function handleSocks(client: Socket, config: RuntimeConfig, dns: Synthetic
 			: await socksConnect(config.proxyUrl, destination, port);
 		client.write(Buffer.from([5, 0, 0, 1, 0, 0, 0, 0, 0, 0]));
 		const pending = reader.release();
+		client.setTimeout(0);
 		if (pending.length) upstream.write(pending);
 		client.pipe(upstream).pipe(client);
 		client.once('close', () => upstream?.destroy());
@@ -195,20 +204,27 @@ export async function startNetworkSidecar(directory: string, config: RuntimeConf
 	await mkdir(directory, {recursive: true, mode: 0o700});
 	const dns = new SyntheticDns();
 	const sockets = new Set<Socket>();
-	const track = (socket: Socket) => { sockets.add(socket); socket.once('close', () => sockets.delete(socket)); };
+	const track = (socket: Socket) => {
+		if (sockets.size >= 512) { socket.destroy(); return false; }
+		sockets.add(socket);
+		socket.once('close', () => sockets.delete(socket));
+		return true;
+	};
 	const servers: Server[] = [];
 	try {
-		servers.push(await bindServer(join(directory, 'socks.sock'), socket => { track(socket); void handleSocks(socket, config, dns); }));
+		servers.push(await bindServer(join(directory, 'socks.sock'), socket => { if (track(socket)) void handleSocks(socket, config, dns); }));
 		servers.push(await bindServer(join(directory, 'http.sock'), socket => {
-			track(socket);
+			if (!track(socket)) return;
+			socket.setTimeout(20_000, () => socket.destroy());
 			void handleSidecarHttp(socket, config.proxyUrl, async (host, port) => {
 				const destination = dns.lookup(host) || host;
 				if (forbiddenDestination(destination)) throw new Error('禁止访问云元数据');
 				return directDestination(destination, config.noProxy) ? directTcp(destination, port) : socksConnect(config.proxyUrl, destination, port);
-			});
+			}).finally(() => socket.setTimeout(0));
 		}));
 		servers.push(await bindServer(join(directory, 'dns.sock'), socket => {
-			track(socket);
+			if (!track(socket)) return;
+			socket.setTimeout(5_000, () => socket.destroy());
 			const chunks: Buffer[] = [];
 			socket.on('data', chunk => { if (chunks.reduce((size, part) => size + part.length, 0) < 4096) chunks.push(Buffer.from(chunk)); });
 			socket.on('end', () => {

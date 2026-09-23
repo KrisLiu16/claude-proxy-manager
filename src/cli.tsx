@@ -9,15 +9,34 @@ import {SSHClient} from './ssh.js';
 import type {ProgressReporter} from './ssh.js';
 import type {HostProfile} from './types.js';
 import {statusSummary} from './types.js';
-import {inspectProxyRuntime, readRuntimeConfig, resolvedRuntimeEnvironment, runBridge, runClaudeProxy, stopBridge} from './proxy-runtime.js';
+import {inspectProxyRuntime, readRuntimeConfig, resolvedRuntimeEnvironment, runBridge, runClaudeProxy, runGenericSandbox, stopBridge} from './proxy-runtime.js';
 import {applyRemoteConfig, remoteStatus, toggleRemote} from './remote.js';
 import {VERSION} from './version.js';
-import {prepareLinuxSandbox, sandboxChild, sandboxInit} from './linux-sandbox.js';
+import {ensureContainerImage, prepareDockerEngine} from './isolated-sandbox.js';
+import {runContainerCommand} from './container-relay.js';
 
 async function handleRuntimeMode(): Promise<boolean> {
 	const command = process.argv[2];
 	if (command === 'proxy') {
 		process.exitCode = await runClaudeProxy(process.argv.slice(3));
+		return true;
+	}
+	if (command === 'sandbox') {
+		process.exitCode = await runGenericSandbox(process.argv.slice(3));
+		return true;
+	}
+	if (command === '__container-run') {
+		if (!process.argv[3]) throw new Error('独立容器缺少启动命令');
+		process.exitCode = await runContainerCommand(process.argv[3], process.argv.slice(4));
+		return true;
+	}
+	if (command === '__container-prepare') {
+		await prepareDockerEngine();
+		const rows = await inspectProxyRuntime();
+		if (rows.some(item => item.state === 'FAIL')) throw new Error('代理检查未通过，无法构建独立容器');
+		const resolved = await resolvedRuntimeEnvironment();
+		const config = await readRuntimeConfig();
+		process.stdout.write(`${await ensureContainerImage({...config, ...resolved})}\n`);
 		return true;
 	}
 	if (command === '__proxy-bridge') {
@@ -26,18 +45,6 @@ async function handleRuntimeMode(): Promise<boolean> {
 		const tokenIndex = process.argv.indexOf('--health-token');
 		if (configIndex < 0 || portIndex < 0 || tokenIndex < 0) throw new Error('bridge 参数缺失');
 		await runBridge(process.argv[configIndex + 1]!, Number(process.argv[portIndex + 1]), process.argv[tokenIndex + 1]!);
-		return true;
-	}
-	if (command === '__sandbox-prepare') {
-		process.stdout.write(`${await prepareLinuxSandbox()}\n`);
-		return true;
-	}
-	if (command === '__sandbox-init') {
-		process.exitCode = await sandboxInit(process.argv[3]!);
-		return true;
-	}
-	if (command === '__sandbox-child') {
-		process.exitCode = await sandboxChild(process.argv[3]!);
 		return true;
 	}
 	if (command === '__stop-bridge') {
@@ -127,7 +134,8 @@ program.command('check <name>').description('检查远端状态和代理连通�
 	console.log(statusSummary(await ssh.check(findHost(hosts, String(name)), cliProgressReporter())));
 });
 
-program.command('proxy [args...]').description('使用当前机器配置的代理运行 Claude Code');
+program.command('proxy [args...]').description('在独立容器中运行 Claude，或用 cpm proxy codex 运行 Codex');
+program.command('sandbox [args...]').description('在独立容器中运行任意命令，默认 Claude');
 
 program.command('setup <name>').description('安装、配置并应用默认替换开关').action(async name => {
 	const {hosts, ssh, secrets} = await context();

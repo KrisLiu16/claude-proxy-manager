@@ -6,7 +6,7 @@
 - 安装官方 Claude Code
 - 把适合开发机平台的 `cpm` 分发到远端
 - 内置 HTTP → SOCKS5 bridge
-- 在 Linux 开发机的独立进程和网络空间中运行 Claude Code
+- 在独立容器中运行 Claude、Codex 或任意开发命令
 - 逐项检查文件、网络、环境变量、时区和出口 IP
 - 安装和设置时显示阶段、百分比、传输 MiB 与已用时间
 
@@ -29,7 +29,7 @@ curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main
 安装指定版本：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main/install.sh | CPM_VERSION=v0.7.1 sh
+curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main/install.sh | CPM_VERSION=v0.8.0 sh
 ```
 
 安装器支持 Linux/macOS 的 x64 和 arm64，验证 Release 资产的 SHA-256，默认写入 `~/.local/bin/cpm`。可用以下变量调整：
@@ -37,7 +37,7 @@ curl -fsSL https://raw.githubusercontent.com/KrisLiu16/claude-proxy-manager/main
 ```text
 CPM_INSTALL_DIR=/custom/bin
 CPM_NO_MODIFY_PATH=1
-CPM_VERSION=v0.7.1
+CPM_VERSION=v0.8.0
 ```
 
 ## 工作方式
@@ -55,16 +55,16 @@ CPM_VERSION=v0.7.1
 开发机 cpm proxy
   ├─ 读取 ~/.config/cpm/proxy.env
   ├─ 启动前验证 SOCKS5、代理出口与地理信息
-  ├─ 创建独立网络、进程、主机名和挂载空间
-  ├─ 保留开发机文件系统读写，覆盖 /etc/localtime 等宿主信息入口
-  ├─ sidecar 处理 TCP 出网、合成 DNS 与内网白名单
-  ├─ 在沙箱内部复查出口 IP、路由、DNS、时区和主机名
-  └─ 执行真实 Claude 及其子进程，并自动加入 --no-chrome
+  ├─ 构建固定基础镜像：Git、Node.js、Python、官方 Claude、cpm
+  ├─ 启动无外网、只读根文件系统、无 capability 的独立容器
+  ├─ 仅挂容器专属 HOME、工作区卷和只读 sidecar 通信目录
+  ├─ 在容器里复查直连阻断、DNS、时区和代理出口
+  └─ 默认执行 Claude，也可执行 Codex 或任意命令
 ```
 
-开发机不访问 GitHub 或 npm 来安装 Claude/cpm。开发机缺少 redsocks 时，`s` 通过系统 apt 源下载并解包这项网络组件。
+Claude/cpm 二进制仍从管理器通过 SSH 分发。开发机首次构建镜像时从系统源安装工具；首次运行 Codex 时，它在独立 HOME 中通过受控代理安装官方 npm 包。
 
-管理器支持 Linux/macOS x64 与 arm64；强制隔离的 `cpm proxy` 当前支持 Linux 开发机。开发机需要 `sudo -n` 能创建 namespace，并具备 `unshare`、`mount`、`ip`、`nft`、`setpriv`。隔离不可用时启动会失败，不会退回到只设置代理环境变量的模式。
+管理器支持 Linux/macOS x64 与 arm64；独立容器当前支持 Linux 开发机。开发机需要 Docker Engine、seccomp 与 AppArmor；`s` 会在缺少 Docker 的 Ubuntu/Debian 开发机上尝试通过免密 sudo 安装并启动它。缺少隔离能力时启动失败。
 
 ## TUI
 
@@ -86,7 +86,7 @@ q    退出
 
 安装过程会实时显示当前阶段。下载 Claude/cpm 和 SSH 上传时同时显示已传输 MiB，远端检查阶段持续显示已用时间。
 
-`s` 是幂等操作：开发机已有 Claude Code 时直接复用；远端 `cpm --version` 与当前管理器版本一致时，跳过 cpm 下载、校验和 SSH 上传。沙箱组件、代理、白名单、时区、语言、默认替换开关与最终检查仍会正常执行。
+`s` 是幂等操作：开发机已有 Claude Code 时直接复用；远端 `cpm --version` 与当前管理器版本一致时，跳过 cpm 下载、校验和 SSH 上传。镜像按二进制摘要、时区、语言和构建规则缓存；HOME 和工作区卷跨启动保留。
 
 ### macOS 安全浏览器
 
@@ -115,7 +115,7 @@ q    退出
 - `NO_PROXY` 白名单
 - Claude 进程时区，默认 `auto`，根据代理出口注入 IANA 时区
 - Claude 进程 locale，默认 `auto`，根据出口国家与语言注入
-- 可选的 `CLAUDE_CONFIG_DIR`，用于需要独立或持久化 Claude 状态的开发机
+- Claude 与 Codex 的登录状态保存在各自开发机的容器 HOME 卷中
 - 是否让 `claude` 默认执行 `cpm proxy`，新建机器默认开启
 
 代理也可以用一行快速导入：
@@ -143,6 +143,10 @@ cpm disable dev
 
 # 在当前机器直接运行
 cpm proxy
+cpm proxy codex
+cpm proxy -- python3 --version
+cpm sandbox -- git clone https://example.com/project.git
+cpm sandbox -- bash
 cpm proxy --check
 ```
 
@@ -161,15 +165,15 @@ cpm proxy --check
 | 区域 | `TZ`、`LANG`、`LC_ALL`、`LC_CTYPE`、`LC_MESSAGES` |
 | 网络 | 宿主直连探测状态、代理出口 IP、节点 IP 对比、Anthropic API |
 | 地理信息 | 国家、州/地区、城市、ISP/组织、IANA 时区、语言、数据来源 |
-| 启动 | `--no-chrome`、默认替换开关、沙箱组件与 namespace 权限 |
+| 启动 | 默认替换开关、Docker 服务、seccomp、AppArmor |
 
 检查会实际完成 SOCKS5 认证、经代理的 TLS 请求和 Anthropic API 连通性测试。启动前不会让宿主机直连公网探测真实 IP。错误行包含具体原因，不包含代理密码。
 
-正常执行 `cpm proxy` 或通过默认替换执行 `claude` 时，会先打印现有完整检查表，再创建沙箱并打印其中的路由、DNS、时区、主机名和出口检查。任一 `FAIL` 都会停止启动 Claude。
+正常执行 `cpm proxy` 或通过默认替换执行 `claude` 时，会先打印宿主代理检查表，再在容器里打印直连阻断、DNS、时区、主机名和出口检查。任一 `FAIL` 都会停止启动目标命令。运行其他命令时不会要求 Anthropic API 连通。
 
-## Claude 运行环境
+## 独立运行环境
 
-`cpm proxy` 仍为 Claude 及其子进程设置以下兼容性环境变量；实际网络限制由独立网络空间和 sidecar 执行，时区与主机名由独立挂载和 UTS 空间覆盖：
+CPM 只从宿主向容器传入以下运行所需变量；代理密码、SSH 凭据和宿主 Claude/Codex 登录状态不会复制进去：
 
 ```text
 ALL_PROXY=http://127.0.0.1:17891
@@ -178,23 +182,26 @@ HTTPS_PROXY=http://127.0.0.1:17891
 https_proxy=http://127.0.0.1:17891
 HTTP_PROXY=http://127.0.0.1:17891
 http_proxy=http://127.0.0.1:17891
-NO_PROXY=<每台机器的白名单>
-no_proxy=<每台机器的白名单>
+NO_PROXY=localhost,127.0.0.1,::1
+no_proxy=localhost,127.0.0.1,::1
 TZ=<根据代理出口自动探测，例如 America/New_York>
 LANG=<根据出口语言自动生成，例如 en_US.UTF-8>
 LC_ALL=<同 LANG>
 LC_CTYPE=<同 LANG>
 LC_MESSAGES=<同 LANG>
-CLAUDE_CONFIG_DIR=<可选的 Claude 状态目录>
+HOME=/home/node
+CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 ```
 
-沙箱里的外部 TCP 连接都被重定向到本次 sidecar，沙箱内部的回环连接仍可供本地服务使用。DNS 查询返回会话内的合成地址，再由 sidecar 按域名执行白名单或 SOCKS5 转发。云元数据和宿主回环地址始终拒绝。IPv6 外网和非 DNS UDP 当前不可用，依赖它们的工具会报网络错误。
+容器使用 Docker 的 `network none`：外部 TCP、UDP 和 IPv6 直连都无法建立。容器里的回环 HTTP/SOCKS 服务通过只读挂载的 Unix socket 联系宿主 sidecar；每台机器的白名单由 sidecar 决定，应用程序不能用 `NO_PROXY` 绕过。未使用代理的网络工具会失败，可以改用支持 HTTP/SOCKS 代理的方式。
 
-项目、HOME 和开发机工具仍使用真实文件系统，Claude 修改的文件立即写回原位置。沙箱覆盖 `/etc/localtime`、`/etc/timezone`、`/etc/hostname`、`/etc/hosts`、`/etc/resolv.conf`、`/etc/machine-id`、`/etc/default/locale`、主机名、进程表、云初始化目录与日志、DMI 信息以及 `/run`。宿主连接变量和常见云地域变量不会传给 Claude。对整个文件系统的读写权限也意味着进程可以通过其他宿主 socket 或可写文件间接影响沙箱外的程序；此模式不能提供完全隔绝宿主机的安全边界。
+宿主项目和 HOME 不挂入容器。容器有自己的 `/home/node` 与 `/workspace` 持久卷，可在里面克隆代码、建立 Python 虚拟环境、安装 npm 包并保留登录状态。根文件系统只读，`/tmp` 和 `/run` 为临时文件系统；需要新增系统包时，要重建基础镜像。容器禁用所有 Linux capability，启用 `no-new-privileges`、seccomp、AppArmor 与进程/内存限额。Linux 内核和容器运行痕迹仍可能被检测到，不能承诺程序无法识别自己处于容器中。
+
+[Claude-Shield](https://github.com/CACEB001/Claude-Shield) 的扫描、locale 和代理审计思路可用于对照检查；它的二进制补丁针对历史 Claude 版本，仓库说明相关路径在 2.1.197+ 已移除。CPM 不修改官方 Claude 或 Codex 的二进制。容器内首次使用时，用户需要自行完成对应 CLI 的登录。
 
 自动探测以 `ipapi.co` 为主，`ipwho.is` 为备用，结果按代理配置缓存 6 小时。时区与 locale 可以按机器显式填写，手动值优先。实时 API 失败时，即使缓存已经超过 6 小时，也会继续使用最后一次成功结果；自动模式下从未生成缓存则停止启动。IP 地理位置来自数据库估算，城市和 ISP 可能在不同供应商之间有差异。
 
-bridge 只监听 `127.0.0.1`，SOCKS5 凭据从权限为 `0600` 的配置文件读取，不进入进程参数。
+宿主 bridge 只监听 `127.0.0.1`，SOCKS5 凭据从权限为 `0600` 的配置文件读取，不进入容器环境或进程参数。直接执行开发机上的原生 Claude 二进制会绕过 CPM；默认 `claude` 命令由 shell 函数路由到 `cpm proxy`。
 
 ## 文件布局
 
@@ -214,11 +221,12 @@ bridge 只监听 `127.0.0.1`，SOCKS5 凭据从权限为 `0600` 的配置文件�
 ~/.local/bin/claude
 ~/.config/cpm/proxy.env
 ~/.local/share/cpm/shim-bin/claude
-~/.local/share/cpm/native/usr/sbin/redsocks（开发机未预装时）
 ~/.local/state/cpm/bridge-17891.pid
 ~/.local/state/cpm/bridge-17891.log
 ~/.local/state/cpm/geolocation.json
 ```
+
+Docker 管理的持久卷为 `cpm-home-<ID>` 和 `cpm-workspace-<ID>`。CPM 不会自动删除其中的代码或登录状态。
 
 密码只保存在本机 `secrets.json` 和开发机 `proxy.env` 中，两者权限均为 `0600`。密码不会写入主机列表、Git、SSH 参数或 bridge 进程参数。
 
