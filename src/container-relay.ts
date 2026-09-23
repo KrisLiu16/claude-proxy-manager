@@ -7,6 +7,7 @@ import {hostname, networkInterfaces} from 'node:os';
 import {join} from 'node:path';
 import {bridgedHttps} from './proxy-runtime.js';
 import {statusSummary, type CheckItem} from './types.js';
+import {pipeSockets} from './socket-pair.js';
 
 const EGRESS_DIR = '/cpm-egress';
 const SOCKS_PORT = 17_893;
@@ -14,10 +15,7 @@ const DNS_PORT = 53;
 
 function relay(client: Socket, destination: string): void {
 	const upstream = createConnection(destination);
-	client.once('close', () => upstream.destroy());
-	upstream.once('close', () => client.destroy());
-	upstream.once('error', () => client.destroy());
-	client.pipe(upstream).pipe(client);
+	pipeSockets(client, upstream);
 }
 
 async function listenTcp(port: number, listener: (client: Socket) => void): Promise<Server> {
@@ -81,6 +79,25 @@ async function externalTcpBlocked(host: string): Promise<boolean> {
 	});
 }
 
+async function inheritedCommand(command: string, args: string[]): Promise<number> {
+	return await new Promise<number>((resolve, reject) => {
+		const child = spawn(command, args, {stdio: 'inherit'});
+		child.once('error', reject);
+		child.once('exit', (code, signal) => {
+			if (signal) process.kill(process.pid, signal);
+			resolve(code ?? 1);
+		});
+	});
+}
+
+async function codexLoggedIn(binary: string): Promise<boolean> {
+	return await new Promise<boolean>(resolve => {
+		const child = spawn(binary, ['login', 'status'], {stdio: 'ignore'});
+		child.once('error', () => resolve(false));
+		child.once('exit', code => resolve(code === 0));
+	});
+}
+
 async function runCommand(command: string, args: string[]): Promise<number> {
 	if (command === 'codex') {
 		const binary = '/home/node/.local/node_modules/.bin/codex';
@@ -100,15 +117,14 @@ async function runCommand(command: string, args: string[]): Promise<number> {
 			} finally { clearInterval(progress); }
 			if (installed !== 0) return installed;
 		}
+		if (!args.length && !await codexLoggedIn(binary)) {
+			console.error('CPM：隔离容器无法接收浏览器的 localhost OAuth 回调；首次使用 Codex 将启动设备码登录。');
+			console.error('CPM：如提示设备码未启用，请在 ChatGPT 账户或工作区设置中启用，再重试。');
+			const login = await inheritedCommand(binary, ['login', '--device-auth']);
+			if (login !== 0) return login;
+		}
 	}
-	return await new Promise<number>((resolve, reject) => {
-		const child = spawn(command, command === 'claude' ? ['--no-chrome', ...args] : args, {stdio: 'inherit'});
-		child.once('error', reject);
-		child.once('exit', (code, signal) => {
-			if (signal) process.kill(process.pid, signal);
-			resolve(code ?? 1);
-		});
-	});
+	return inheritedCommand(command, command === 'claude' ? ['--no-chrome', ...args] : args);
 }
 
 export async function runContainerCommand(command: string, args: string[]): Promise<number> {
@@ -133,6 +149,7 @@ export async function runContainerCommand(command: string, args: string[]): Prom
 		checks.push({name: '进程 capability', state: /^0+$/.test(field('CapEff')) ? 'PASS' : 'FAIL', value: field('CapEff')});
 		checks.push({name: 'no-new-privileges', state: field('NoNewPrivs') === '1' ? 'PASS' : 'FAIL', value: field('NoNewPrivs')});
 		checks.push({name: 'seccomp', state: field('Seccomp') === '2' ? 'PASS' : 'FAIL', value: field('Seccomp')});
+		checks.push({name: 'CPM 资源配置', state: 'INFO', value: '无额外 CPU/内存/cgroup 进程上限；继承宿主 ulimit'});
 		const mounts = await readFile('/proc/self/mountinfo', 'utf8');
 		const rootMount = mounts.split('\n').find(line => line.split(' ')[4] === '/')?.split(' ')[5] || '';
 		checks.push({name: '只读根文件系统', state: rootMount.split(',').includes('ro') ? 'PASS' : 'FAIL', value: rootMount});

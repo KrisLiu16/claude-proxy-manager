@@ -3,6 +3,7 @@ import {mkdir, rm} from 'node:fs/promises';
 import {join} from 'node:path';
 import {lookup} from 'node:dns/promises';
 import {handleSidecarHttp, socksConnect, type RuntimeConfig} from './proxy-runtime.js';
+import {pipeSockets} from './socket-pair.js';
 
 const SYNTHETIC_BASE = 0xc6120000; // 198.18.0.0/15, reserved for network testing.
 const SYNTHETIC_LIMIT = 131_070;
@@ -179,10 +180,8 @@ async function handleSocks(client: Socket, config: RuntimeConfig, dns: Synthetic
 		client.write(Buffer.from([5, 0, 0, 1, 0, 0, 0, 0, 0, 0]));
 		const pending = reader.release();
 		client.setTimeout(0);
-		if (pending.length) upstream.write(pending);
-		client.pipe(upstream).pipe(client);
-		client.once('close', () => upstream?.destroy());
-		upstream.once('close', () => client.destroy());
+		pipeSockets(client, upstream);
+		if (pending.length && !upstream.destroyed) upstream.write(pending);
 	} catch {
 		if (!client.destroyed) client.end(Buffer.from([5, 2, 0, 1, 0, 0, 0, 0, 0, 0]));
 		upstream?.destroy();
@@ -205,16 +204,14 @@ export async function startNetworkSidecar(directory: string, config: RuntimeConf
 	const dns = new SyntheticDns();
 	const sockets = new Set<Socket>();
 	const track = (socket: Socket) => {
-		if (sockets.size >= 512) { socket.destroy(); return false; }
 		sockets.add(socket);
 		socket.once('close', () => sockets.delete(socket));
-		return true;
 	};
 	const servers: Server[] = [];
 	try {
-		servers.push(await bindServer(join(directory, 'socks.sock'), socket => { if (track(socket)) void handleSocks(socket, config, dns); }));
+		servers.push(await bindServer(join(directory, 'socks.sock'), socket => { track(socket); void handleSocks(socket, config, dns); }));
 		servers.push(await bindServer(join(directory, 'http.sock'), socket => {
-			if (!track(socket)) return;
+			track(socket);
 			socket.setTimeout(20_000, () => socket.destroy());
 			void handleSidecarHttp(socket, config.proxyUrl, async (host, port) => {
 				const destination = dns.lookup(host) || host;
@@ -223,7 +220,7 @@ export async function startNetworkSidecar(directory: string, config: RuntimeConf
 			}).finally(() => socket.setTimeout(0));
 		}));
 		servers.push(await bindServer(join(directory, 'dns.sock'), socket => {
-			if (!track(socket)) return;
+			track(socket);
 			socket.setTimeout(5_000, () => socket.destroy());
 			const chunks: Buffer[] = [];
 			socket.on('data', chunk => { if (chunks.reduce((size, part) => size + part.length, 0) < 4096) chunks.push(Buffer.from(chunk)); });

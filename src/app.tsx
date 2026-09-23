@@ -166,6 +166,7 @@ export function App({initial, platform = process.platform, onLaunch}: {initial: 
 				<Text>时区 / 语言   {current.settings.timezone} / {current.settings.locale}  ·  bridge {current.settings.httpPort}</Text>
 				<Text>Claude        {snapshot.claude}  ·  默认路由 <Text color={current.settings.replaceClaude ? 'green' : 'yellow'}>{current.settings.replaceClaude ? '开启' : '关闭'}</Text></Text>
 				<Text>Docker        {snapshot.docker}</Text>
+				<Text>资源          CPM 不设 CPU / 内存 / 进程数上限</Text>
 			</Box>
 			<Box borderStyle="round" borderColor="blue" flexDirection="column" paddingX={1} marginTop={1}>
 				<Text bold>共享工作区  <Text color={prepared ? 'green' : 'yellow'}>{prepared ? '本次已准备' : snapshot.volumes}</Text></Text>
@@ -210,6 +211,7 @@ export function App({initial, platform = process.platform, onLaunch}: {initial: 
 			<Text>cpm enter         在共享 /workspace 中打开交互式 bash</Text>
 			<Text>cpm exec -- git status   在共享 /workspace 执行单条命令</Text>
 			<Text>cpm proxy         启动 Claude；cpm proxy codex 启动 Codex</Text>
+			<Text>Codex 首次登录使用设备码；在浏览器中由你完成验证</Text>
 			<Text>TUI 快捷键 1 / 2 / 3 可直接进入、启动 Claude 或 Codex</Text>
 			<Text>cpm sandbox -- python3 -V   在同一工作区运行其他程序</Text>
 			<Box marginTop={1}><Text dimColor>HOME 和 /workspace 持久；每条命令是新容器，后台进程不会延续。</Text></Box>

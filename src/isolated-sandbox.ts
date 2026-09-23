@@ -253,7 +253,28 @@ export type ContainerStart = {
 	expectedExitIp: string;
 	terminal: boolean;
 	term: string;
+	ulimits?: string[];
 };
+
+export function parseHostUlimits(table: string): string[] {
+	const names = new Map([
+		['Max open files', 'nofile'],
+		['Max locked memory', 'memlock'],
+		['Max processes', 'nproc'],
+		['Max core file size', 'core'],
+	]);
+	const result: string[] = [];
+	for (const line of table.split('\n')) {
+		const columns = line.trim().split(/\s{2,}/);
+		const key = names.get(columns[0] || '');
+		if (!key || !columns[1] || !columns[2]) continue;
+		const value = (entry: string) => entry === 'unlimited' ? '-1' : /^\d+$/.test(entry) ? entry : '';
+		const soft = value(columns[1]);
+		const hard = value(columns[2]);
+		if (soft && hard) result.push(`${key}=${soft}:${hard}`);
+	}
+	return result;
+}
 
 export function containerRunArguments(start: ContainerStart): string[] {
 	const proxy = `http://127.0.0.1:${start.config.httpPort}`;
@@ -272,8 +293,9 @@ export function containerRunArguments(start: ContainerStart): string[] {
 		'--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
 		'--security-opt', 'apparmor=docker-default', '--cgroupns', 'private',
 		'--user', `${start.uid}:${start.gid}`, '--hostname', 'cpm-dev',
-		'--dns', '127.0.0.1', '--pids-limit', '512', '--memory', '8g',
-		'--tmpfs', '/tmp:rw,nosuid,nodev,size=256m', '--tmpfs', '/run:rw,nosuid,nodev,size=64m',
+		...(start.ulimits || []).flatMap(limit => ['--ulimit', limit]),
+		'--dns', '127.0.0.1',
+		'--mount', 'type=volume,dst=/tmp', '--tmpfs', '/run:rw,nosuid,nodev',
 		'--tmpfs', '/sys:ro,nosuid,nodev,noexec',
 		'--mount', `type=volume,src=cpm-home-${start.volumeId},dst=/home/node`,
 		'--mount', `type=volume,src=cpm-workspace-${start.volumeId},dst=/workspace`,
@@ -299,6 +321,7 @@ export async function runIsolatedContainer(config: RuntimeConfig, executable: st
 			volumeId: id, uid: process.getuid!(), gid: process.getgid!(), config,
 			executable, args, expectedExitIp,
 			terminal: Boolean(process.stdin.isTTY && process.stdout.isTTY), term: process.env.TERM || 'xterm-256color',
+			ulimits: parseHostUlimits(await readFile('/proc/self/limits', 'utf8')),
 		});
 		const result = await docker(options, {inherit: true});
 		return result.code;

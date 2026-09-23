@@ -74,6 +74,7 @@ program.name('cpm')
 TUI 快捷键：e 配置，s 准备，c 检查，1 进入，2 Claude，3 Codex，h 帮助。
 
 每次命令会启动新容器；/home/node 与 /workspace 使用同一组具名卷持久保存。
+CPM 不设置 CPU、内存或进程数上限。Codex 首次登录使用设备码流程。
 容器外的宿主代码不会自动出现，请在 /workspace 中克隆仓库。
 隔离降低环境暴露风险，但不能保证抵御内核漏洞或宿主 Docker 管理员。`);
 

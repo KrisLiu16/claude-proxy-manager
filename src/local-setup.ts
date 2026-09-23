@@ -173,6 +173,7 @@ export async function checkLocal(): Promise<CheckItem[]> {
 		checks.push({name: 'claude 命令解析', state: routed ? 'PASS' : 'FAIL', value: routed ? 'cpm proxy' : '仍指向原生 Claude', detail: resolution.replaceAll(/\s+/g, ' ').slice(0, 240) || '登录 shell 中找不到 claude'});
 	}
 	checks.push({name: '容器生命周期', state: 'INFO', value: '每条命令新容器；HOME 与工作区卷持久'});
+	checks.push({name: 'CPM 资源配置', state: 'INFO', value: '无额外 CPU/内存/cgroup 进程/连接上限；继承宿主 ulimit'});
 	checks.push({name: '容器内验证', state: 'INFO', value: '执行目标命令前再检查直连、权限、DNS 与出口'});
 	return checks;
 }

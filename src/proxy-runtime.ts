@@ -11,6 +11,7 @@ import {statusSummary, type CheckItem, type CheckState} from './types.js';
 import {VERSION} from './version.js';
 import {loadCachedGeo, lookupGeoProfile, saveCachedGeo, type GeoProfile} from './geolocation.js';
 import {inspectContainerPrerequisites, runIsolatedContainer} from './isolated-sandbox.js';
+import {pipeSockets} from './socket-pair.js';
 
 const DEFAULT_PORT = 17_891;
 const DEFAULT_TIMEZONE = 'auto';
@@ -315,6 +316,7 @@ async function readHttpHead(client: Socket): Promise<{head: Buffer; rest: Buffer
 async function handleProxyClient(client: Socket, proxyUrl: string, healthToken: string, dial?: (host: string, port: number) => Promise<Socket>): Promise<void> {
 	let upstream: Socket | undefined;
 	client.once('close', () => upstream?.destroy());
+	client.on('error', () => upstream?.destroy());
 	try {
 		const {head, rest} = await readHttpHead(client);
 		const lines = head.toString('latin1').split('\r\n');
@@ -339,7 +341,7 @@ async function handleProxyClient(client: Socket, proxyUrl: string, healthToken: 
 			upstream.write(`${method} ${path} ${protocol}\r\n${filtered.join('\r\n')}\r\nConnection: close\r\n\r\n`);
 			if (rest.length) upstream.write(rest);
 		}
-		client.pipe(upstream).pipe(client);
+		pipeSockets(client, upstream);
 	} catch {
 		if (!client.destroyed) client.end('HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n');
 		upstream?.destroy();
