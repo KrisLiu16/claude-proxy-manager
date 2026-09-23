@@ -159,17 +159,23 @@ async function claudeResolution(): Promise<string> {
 	} finally { clearTimeout(timer); }
 }
 
-export async function checkLocal(): Promise<CheckItem[]> {
+export async function checkLocal(report?: ProgressReporter): Promise<CheckItem[]> {
+	const update = (percent: number, label: string) => report?.({percent, label});
+	update(2, '读取代理配置与本机运行时');
 	let checks: CheckItem[];
-	try { checks = await inspectProxyRuntime('generic'); }
+	try { checks = await inspectProxyRuntime('generic', progress => update(Math.max(2, Math.round(progress.percent * 0.7)), progress.label)); }
 	catch (error) { checks = [{name: '代理运行时', state: 'FAIL', value: (error as Error).message}]; }
+	update(74, '读取宿主系统与开发工具');
 	const host = await machineFacts();
 	const recipe = imageRecipeForHost(host.os);
 	checks.push({name: '宿主发行版', state: recipe.note ? 'WARN' : 'PASS', value: host.os.prettyName || `${host.os.id} ${host.os.versionId}`, detail: recipe.note || `基础镜像 ${recipe.baseImage.split('@')[0]}`});
+	update(81, '检查 Docker 安全能力');
 	const docker = await inspectContainerPrerequisites();
 	checks.push(...docker);
+	update(87, '核对持久工作区卷');
 	if (!docker.some(row => row.state === 'FAIL')) checks.push(...await inspectPersistentVolumes());
 	if (!docker.some(row => row.state === 'FAIL')) {
+		update(93, '逐项对照宿主与当前镜像');
 		try {
 			const config = await readRuntimeConfig();
 			if (config.proxyUrl && config.claudeBin) {
@@ -179,6 +185,7 @@ export async function checkLocal(): Promise<CheckItem[]> {
 		} catch (error) { checks.push({name: '宿主镜像对照', state: 'INFO', value: (error as Error).message}); }
 	}
 	const {settings} = await readLocalSettings();
+	update(97, '确认 claude 默认路由');
 	checks.push({name: 'claude 默认路由', state: settings.replaceClaude ? 'PASS' : 'INFO', value: settings.replaceClaude ? '开启，新 shell 生效' : '关闭'});
 	if (settings.replaceClaude) {
 		const resolution = await claudeResolution();
@@ -188,6 +195,7 @@ export async function checkLocal(): Promise<CheckItem[]> {
 	checks.push({name: '容器生命周期', state: 'INFO', value: '每条命令新容器；HOME 与工作区卷持久'});
 	checks.push({name: 'CPM 资源配置', state: 'INFO', value: '无额外 CPU/内存/cgroup 进程/连接上限；继承宿主 ulimit'});
 	checks.push({name: '容器内验证', state: 'INFO', value: '执行目标命令前再检查直连、权限、DNS 与出口'});
+	update(100, '本机逐项检查完成');
 	return checks;
 }
 
@@ -222,7 +230,7 @@ export async function prepareLocal(report?: ProgressReporter): Promise<string> {
 	await saveLocalSettings(settings.settings);
 	const config = await readRuntimeConfig();
 	update(48, '逐项验证代理、出口 IP 与区域信息');
-	const checks = await checkLocal();
+	const checks = await checkLocal(progress => update(48 + Math.round(progress.percent * 0.20), progress.label));
 	const failed = checks.find(item => item.state === 'FAIL');
 	if (failed) throw new Error(`${failed.name}：${failed.value}${failed.detail ? ` (${failed.detail})` : ''}`);
 	update(70, '创建或核对持久 HOME 与 /workspace 卷');
@@ -231,7 +239,7 @@ export async function prepareLocal(report?: ProgressReporter): Promise<string> {
 	if (resolution.error && (config.timezone === 'auto' || config.locale === 'auto') && !resolution.geo) throw new Error(`区域信息探测失败且没有缓存：${resolution.error}`);
 	update(78, '准备独立容器镜像；首次构建可能需要几分钟');
 	const image = await ensureContainerImage({...config, ...resolution.config}, line => {
-		if (line) update(82, `构建镜像：${line.slice(0, 65)}`);
+		if (/^Step \d+\/\d+|^Fetched|^Successfully/.test(line)) update(82, `构建镜像：${line.slice(0, 65)}`);
 	});
 	update(95, '逐项对照宿主系统与新镜像');
 	const comparison = await inspectImageCompatibility(image);

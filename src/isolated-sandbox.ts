@@ -9,6 +9,7 @@ import {compareMachineFacts, imageRecipeForHost, machineFacts, parseOsRelease, t
 import type {RuntimeConfig} from './proxy-runtime.js';
 import {VERSION} from './version.js';
 import {statusSummary, type CheckItem} from './types.js';
+import {TerminalProgress} from './progress-display.js';
 
 // Pin multi-architecture image indexes, so amd64 and arm64 use the same build recipe.
 const NODE_BUILD_IMAGE = 'node:24.20.0-bookworm-slim@sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e';
@@ -346,14 +347,27 @@ export function containerRunArguments(start: ContainerStart): string[] {
 
 export async function runIsolatedContainer(config: RuntimeConfig, executable: string, args: string[], expectedExitIp: string): Promise<number> {
 	if (!expectedExitIp) throw new Error('没有经过代理验证的出口 IP，停止启动独立容器');
-	const volumes = await ensurePersistentVolumes();
-	const image = await ensureContainerImage(config);
-	const comparison = await inspectImageCompatibility(image);
+	const progress = new TerminalProgress('CPM 容器准备');
+	let volumes: VolumeRecord;
+	let image: string;
+	let comparison: CheckItem[];
+	try {
+		progress.update({percent: 8, label: '核对共享 HOME 与 /workspace 卷'});
+		volumes = await ensurePersistentVolumes();
+		progress.update({percent: 25, label: '查找或构建当前系统镜像'});
+		image = await ensureContainerImage(config, line => {
+			if (/^Step \d+\/\d+|^Successfully/.test(line)) progress.update({percent: 55, label: `构建镜像：${line.slice(0, 48)}`});
+		});
+		progress.update({percent: 83, label: '逐项对照宿主与镜像环境'});
+		comparison = await inspectImageCompatibility(image);
+		progress.update({percent: 100, label: '容器准备完成'});
+	} finally { progress.finish(); }
 	console.error(`CPM 宿主镜像对照\n${statusSummary({connected: true, checks: comparison})}\n`);
 	if (comparison.some(item => item.state === 'FAIL')) throw new Error('宿主镜像对照未通过，已停止启动目标命令');
 	const directory = await mkdtemp(join(tmpdir(), 'cpm-egress-'));
 	let sidecar: Awaited<ReturnType<typeof startNetworkSidecar>> | undefined;
 	try {
+		console.error('CPM：正在启动受控容器并执行容器内检查');
 		sidecar = await startNetworkSidecar(directory, config);
 		const id = volumes.id;
 		const options = containerRunArguments({

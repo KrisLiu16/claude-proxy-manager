@@ -119,7 +119,7 @@ export function App({initial, platform = process.platform, onLaunch}: {initial: 
 			if (key.escape || input === 'b') { setMode('home'); return; }
 			if (key.upArrow || input === 'k') { setRowIndex(value => Math.max(0, value - 1)); return; }
 			if (key.downArrow || input === 'j') { setRowIndex(value => Math.min(checks.length - 1, value + 1)); return; }
-			if (input === 'c' || input === 'r') { void operation('重新检查', async () => { setChecks(await checkLocal()); setRowIndex(0); return '逐项检查完成'; }); return; }
+			if (input === 'c' || input === 'r') { void operation('重新检查', async report => { setChecks(await checkLocal(report)); setRowIndex(0); return '逐项检查完成'; }); return; }
 		}
 		if (mode === 'help' && (key.escape || input === 'b')) { setMode('home'); return; }
 		if (input === 'q' || key.ctrl && input === 'c') { exit(); return; }
@@ -130,8 +130,8 @@ export function App({initial, platform = process.platform, onLaunch}: {initial: 
 			setPrepared(true);
 			return `工作区已就绪 · ${image}`;
 		});
-		else if (input === 'c') void operation('逐项检查代理与隔离环境', async () => {
-			setChecks(await checkLocal());
+		else if (input === 'c') void operation('逐项检查代理与隔离环境', async report => {
+			setChecks(await checkLocal(report));
 			setRowIndex(0);
 			setMode('audit');
 			return '逐项检查完成；↑/↓ 查看全部结果';

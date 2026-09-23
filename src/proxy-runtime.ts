@@ -12,6 +12,7 @@ import {VERSION} from './version.js';
 import {loadCachedGeo, lookupGeoProfile, saveCachedGeo, type GeoProfile} from './geolocation.js';
 import {inspectContainerPrerequisites, runIsolatedContainer} from './isolated-sandbox.js';
 import {pipeSockets} from './socket-pair.js';
+import {TerminalProgress, type CheckProgress} from './progress-display.js';
 
 const DEFAULT_PORT = 17_891;
 const DEFAULT_TIMEZONE = 'auto';
@@ -501,8 +502,9 @@ async function currentBinaryMatches(): Promise<boolean> {
 	} catch { return false; }
 }
 
-export async function inspectProxyRuntime(target: 'claude' | 'generic' = 'claude'): Promise<CheckItem[]> {
+export async function inspectProxyRuntime(target: 'claude' | 'generic' = 'claude', report?: (progress: CheckProgress) => void): Promise<CheckItem[]> {
 	const rows: CheckItem[] = [];
+	report?.({percent: 2, label: '读取本机配置与 Claude 路径'});
 	const config = await readRuntimeConfig();
 	rows.push(row('cpm 运行时', await currentBinaryMatches() ? 'PASS' : 'INFO', VERSION, process.execPath));
 	try {
@@ -517,23 +519,28 @@ export async function inspectProxyRuntime(target: 'claude' | 'generic' = 'claude
 		rows.push(row('SOCKS5 配置', parsed.protocol === 'socks5h:' ? 'PASS' : 'WARN', `${parsed.hostname}:${parsed.port}`, parsed.protocol === 'socks5h:' ? '远端 DNS' : '建议使用 socks5h'));
 	} catch (error) { rows.push(row('SOCKS5 配置', 'FAIL', (error as Error).message)); }
 	if (parsed) {
+		report?.({percent: 14, label: '连接代理网关 TCP'});
 		try { const tcp = await connectTcp(parsed.hostname.replace(/^\[|\]$/g, ''), Number(parsed.port)); tcp.destroy(); rows.push(row('代理网关 TCP', 'PASS', `${parsed.hostname}:${parsed.port}`)); }
 		catch (error) { rows.push(row('代理网关 TCP', 'FAIL', `${parsed.hostname}:${parsed.port}`, (error as Error).message)); }
+		report?.({percent: 27, label: '验证 SOCKS5 认证与远端 DNS'});
 		try { const socks = await socksConnect(config.proxyUrl, 'api.ipify.org', 443); socks.destroy(); rows.push(row('SOCKS5 认证', 'PASS', '通过')); }
 		catch (error) { rows.push(row('SOCKS5 认证', 'FAIL', '失败', (error as Error).message)); }
 	}
 	let bridgeReady = false;
+	report?.({percent: 38, label: '检查本机 HTTP bridge'});
 	try { await ensureBridge(config); bridgeReady = true; rows.push(row('内置 HTTP bridge', 'PASS', `127.0.0.1:${config.httpPort}`)); }
 	catch (error) { rows.push(row('内置 HTTP bridge', 'FAIL', '不可用', (error as Error).message)); }
 	let exitIp = '';
 	let exitError = '';
 	if (parsed && bridgeReady) {
+		report?.({percent: 52, label: '经代理查询实际出口 IP'});
 		try {
 			const result = await bridgedHttps(config.httpPort, 'api.ipify.org', '/');
 			exitIp = result.status === 200 ? result.body : '';
 			if (!exitIp) exitError = `HTTP ${result.status}`;
 		} catch (error) { exitError = (error as Error).message; }
 	}
+	report?.({percent: 64, label: '查询出口地区、时区与语言'});
 	const resolution = bridgeReady
 		? await resolveAutomaticEnvironment(config, true, exitIp || undefined)
 		: {
@@ -542,6 +549,7 @@ export async function inspectProxyRuntime(target: 'claude' | 'generic' = 'claude
 			cached: false,
 		};
 	const resolved = resolution.config;
+	report?.({percent: 78, label: '核对环境变量和地区设置'});
 	const env = proxyEnvironment(resolved);
 	const proxy = `http://127.0.0.1:${config.httpPort}`;
 	for (const name of ['ALL_PROXY', 'all_proxy', 'HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy'] as const) rows.push(row(name, env[name] === proxy ? 'PASS' : 'FAIL', env[name] || '<空>'));
@@ -582,12 +590,14 @@ export async function inspectProxyRuntime(target: 'claude' | 'generic' = 'claude
 			rows.push(row('出口与节点 IP', !isAddress ? 'INFO' : ip === endpoint ? 'PASS' : 'WARN', !isAddress ? '节点使用域名' : ip === endpoint ? '一致' : '不一致', isAddress && ip !== endpoint ? `${endpoint} → ${ip}` : ''));
 		} else rows.push(row('代理出口 IP', 'FAIL', '获取失败', exitError || 'bridge 不可用'));
 		if (target === 'claude') {
+			report?.({percent: 90, label: '验证 Anthropic API 连通性'});
 			try {
 				const result = await bridgedHttps(config.httpPort, 'api.anthropic.com', '/v1/messages');
 				rows.push(row('Anthropic API', HTTP_OK.has(result.status) ? 'PASS' : 'FAIL', `HTTP ${result.status}`));
 			} catch (error) { rows.push(row('Anthropic API', 'FAIL', '不可达', (error as Error).message)); }
 		} else rows.push(row('Anthropic API', 'SKIP', '非 Claude 命令'));
 	}
+	report?.({percent: 100, label: '代理检查完成'});
 	return rows;
 }
 
@@ -609,11 +619,19 @@ async function runSandboxTarget(command: string, args: string[]): Promise<number
 	parseProxy(config.proxyUrl);
 	if (!await executable(config.claudeBin)) throw new Error(`Claude CLI 不存在：${config.claudeBin || '<未配置>'}`);
 	let exitIp = '';
-	if (!await runProxyPreflight(async () => {
-		const rows = [...await inspectProxyRuntime(command === 'claude' ? 'claude' : 'generic'), ...await inspectContainerPrerequisites()];
-		exitIp = rows.find(item => item.name === '代理出口 IP' && item.state === 'PASS')?.value || '';
-		return rows;
-	})) {
+	const progress = new TerminalProgress('CPM 启动检查');
+	let passed: boolean;
+	try {
+		passed = await runProxyPreflight(async () => {
+			const proxyRows = await inspectProxyRuntime(command === 'claude' ? 'claude' : 'generic', update => progress.update({...update, percent: Math.round(update.percent * 0.9)}));
+			progress.update({percent: 94, label: '检查 Docker、seccomp 与 AppArmor'});
+			const rows = [...proxyRows, ...await inspectContainerPrerequisites()];
+			exitIp = rows.find(item => item.name === '代理出口 IP' && item.state === 'PASS')?.value || '';
+			progress.update({percent: 100, label: '启动前检查完成'});
+			return rows;
+		}, output => { progress.finish(); process.stderr.write(output); });
+	} finally { progress.finish(); }
+	if (!passed) {
 		console.error('cpm: 启动前检查存在 FAIL，已停止启动目标命令');
 		return 3;
 	}
@@ -629,7 +647,13 @@ async function runSandboxTarget(command: string, args: string[]): Promise<number
 
 export async function runClaudeProxy(args: string[]): Promise<number> {
 	if (args[0] === '--check' || args[0] === 'check') {
-		const rows = [...await inspectProxyRuntime(), ...await inspectContainerPrerequisites()];
+		const progress = new TerminalProgress('CPM 逐项检查');
+		let rows: CheckItem[];
+		try {
+			const proxyRows = await inspectProxyRuntime('claude', update => progress.update({...update, percent: Math.round(update.percent * 0.9)}));
+			progress.update({percent: 94, label: '检查 Docker、seccomp 与 AppArmor'});
+			rows = [...proxyRows, ...await inspectContainerPrerequisites()];
+		} finally { progress.finish(); }
 		console.log(formatCheckTable(rows));
 		return rows.some(item => item.state === 'FAIL') ? 3 : 0;
 	}

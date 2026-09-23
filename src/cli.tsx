@@ -10,6 +10,7 @@ import {ensureContainerImage, ensurePersistentVolumes, prepareDockerEngine} from
 import {runContainerCommand} from './container-relay.js';
 import {VERSION} from './version.js';
 import {machineFacts} from './host-baseline.js';
+import {TerminalProgress} from './progress-display.js';
 
 async function runtimeMode(): Promise<boolean> {
 	const command = process.argv[2];
@@ -100,17 +101,18 @@ program.command('help [command]').description('查看 CPM 或某个命令的用�
 
 program.command('setup').description('在本机准备 Claude、Docker 镜像与持久工作区').action(async () => {
 	const started = Date.now();
-	let last = '';
-	const image = await prepareLocal(progress => {
-		const line = `[${String(progress.percent).padStart(3)}%] ${progress.label}`;
-		if (line !== last) console.error(line);
-		last = line;
-	});
+	const progress = new TerminalProgress('CPM 本机准备');
+	let image: string;
+	try { image = await prepareLocal(update => progress.update(update)); }
+	finally { progress.finish(); }
 	console.log(`就绪：${image}（${Math.round((Date.now() - started) / 1000)} 秒）`);
 });
 
 program.command('check').description('在本机逐项检查代理、容器隔离前提与持久卷').action(async () => {
-	const rows = await checkLocal();
+	const progress = new TerminalProgress('CPM 逐项检查');
+	let rows: Awaited<ReturnType<typeof checkLocal>>;
+	try { rows = await checkLocal(update => progress.update(update)); }
+	finally { progress.finish(); }
 	console.log(statusSummary({connected: true, checks: rows}));
 	if (rows.some(item => item.state === 'FAIL')) process.exitCode = 3;
 });
