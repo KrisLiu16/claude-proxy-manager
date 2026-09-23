@@ -357,13 +357,24 @@ export async function runBridge(configFile: string, port: number, healthToken: s
 	const config = await readRuntimeConfig();
 	parseProxy(config.proxyUrl);
 	await mkdir(stateDir(), {recursive: true, mode: 0o700});
-	const server = net.createServer(client => void handleProxyClient(client, config.proxyUrl, healthToken));
+	const clients = new Set<Socket>();
+	const server = net.createServer(client => {
+		clients.add(client);
+		client.once('close', () => clients.delete(client));
+		void handleProxyClient(client, config.proxyUrl, healthToken);
+	});
 	await new Promise<void>((resolve, reject) => {
 		server.once('error', reject);
 		server.listen(port, '127.0.0.1', resolve);
 	});
 	await writeFile(pidPath(port), `${JSON.stringify({pid: process.pid, token: healthToken})}\n`, {mode: 0o600});
-	const stop = () => server.close();
+	let closing = false;
+	const stop = () => {
+		if (closing) return;
+		closing = true;
+		for (const client of clients) client.destroy();
+		server.close();
+	};
 	process.on('SIGTERM', stop);
 	process.on('SIGINT', stop);
 	await new Promise<void>(resolve => server.once('close', resolve));
@@ -418,6 +429,12 @@ export async function stopBridge(port = DEFAULT_PORT): Promise<void> {
 	if (signaledPid) {
 		for (let attempt = 0; attempt < 30 && (processAlive(signaledPid) || await portOpen(port)); attempt++) {
 			await new Promise(resolve => setTimeout(resolve, 100));
+		}
+		if (processAlive(signaledPid) && process.platform === 'linux') {
+			try {
+				const command = await readFile(`/proc/${signaledPid}/cmdline`, 'utf8');
+				if (command.includes('__proxy-bridge')) process.kill(signaledPid, 'SIGKILL');
+			} catch {}
 		}
 	}
 }

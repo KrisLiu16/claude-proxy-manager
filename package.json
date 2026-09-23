@@ -1,6 +1,6 @@
 {
   "name": "claude-proxy-manager",
-  "version": "0.9.2",
+  "version": "0.9.3",
   "description": "Create a persistent isolated workspace on a Linux development machine",
   "type": "module",
   "bin": {

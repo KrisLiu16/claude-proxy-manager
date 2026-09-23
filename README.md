@@ -14,7 +14,7 @@ cpm check           # 逐项检查；解决 FAIL 后再使用
 cpm enter           # 在 /workspace 打开交互式 bash
 ```
 
-安装器从 [GitHub Releases](https://github.com/KrisLiu16/claude-proxy-manager/releases) 下载当前平台的 CPM 单文件程序，校验 SHA-256，默认放到 `~/.local/bin/cpm`。`CPM_VERSION=v0.9.2` 可固定版本；`CPM_INSTALL_DIR` 可指定目录。升级时会先停止旧的宿主代理 bridge，新启动的命令会使用新版本；已经运行的容器不会被中断。独立容器目前只支持 Linux，且要求 Docker Engine、seccomp、AppArmor 和普通用户。Ubuntu/Debian 缺少 Docker 时，`cpm setup` 会尝试使用免密 sudo 安装并启动它；其他发行版需要先自行安装 Docker。
+安装器从 [GitHub Releases](https://github.com/KrisLiu16/claude-proxy-manager/releases) 下载当前平台的 CPM 单文件程序，校验 SHA-256，默认放到 `~/.local/bin/cpm`。`CPM_VERSION=v0.9.3` 可固定版本；`CPM_INSTALL_DIR` 可指定目录。升级时会先停止旧的宿主代理 bridge，新启动的命令会使用新版本；已经运行的容器不会被中断。独立容器目前只支持 Linux，且要求 Docker Engine、seccomp、AppArmor 和普通用户。Ubuntu/Debian 缺少 Docker 时，`cpm setup` 会尝试使用免密 sudo 安装并启动它；其他发行版需要先自行安装 Docker。
 
 首次构建镜像要下载固定的 Node 基础镜像并安装 Git、Python 等工具，可能需要几分钟。后续同版本、同区域配置和相同 Claude 二进制会复用镜像。已有官方 Claude 二进制会直接复用；缺少时，CPM 从官方 npm 平台包下载并验证 SHA-512，再安装到本机 `~/.local/bin/claude`。Codex 首次运行时会在容器 HOME 中安装，其状态随后持久保存。首次登录 Codex 时，CPM 会启动设备码流程，由用户在自己的浏览器完成验证；隔离容器无法接收普通浏览器流程的 localhost OAuth 回调。设备码登录需要在账户或工作区中启用，详见 [OpenAI Codex 登录说明](https://learn.chatgpt.com/docs/auth)。
 
