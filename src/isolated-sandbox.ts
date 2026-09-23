@@ -5,21 +5,27 @@ import {access, copyFile, mkdir, mkdtemp, readFile, rename, rm, writeFile} from 
 import {homedir, tmpdir} from 'node:os';
 import {basename, join} from 'node:path';
 import {startNetworkSidecar} from './network-sidecar.js';
+import {compareMachineFacts, imageRecipeForHost, machineFacts, parseOsRelease, type MachineFacts} from './host-baseline.js';
 import type {RuntimeConfig} from './proxy-runtime.js';
 import {VERSION} from './version.js';
-import type {CheckItem} from './types.js';
+import {statusSummary, type CheckItem} from './types.js';
 
-// Multi-architecture index digest; a local image digest would fail on fresh machines.
-const BASE_IMAGE = 'node:24-bookworm-slim@sha256:0e0ff40c39bc087845bfb27465a0df4ea419520094bc35842ff83dd8cbe6f9b6';
-const DOCKERFILE = `FROM ${BASE_IMAGE}
+// Pin multi-architecture image indexes, so amd64 and arm64 use the same build recipe.
+const NODE_BUILD_IMAGE = 'node:24.20.0-bookworm-slim@sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e';
+function dockerfileForBase(baseImage: string): string { return `FROM ${NODE_BUILD_IMAGE} AS node-runtime
+FROM ${baseImage}
 ARG CPM_TZ
 ARG CPM_LOCALE
 ARG CPM_UID
 ARG CPM_GID
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl git openssh-client python3 python3-venv python3-pip locales tzdata && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl git openssh-client python3 python3-venv python3-pip locales tzdata libstdc++6 && rm -rf /var/lib/apt/lists/*
 RUN set -eu; test -f "/usr/share/zoneinfo/$CPM_TZ"; cp "/usr/share/zoneinfo/$CPM_TZ" /etc/localtime; printf '%s\\n' "$CPM_TZ" > /etc/timezone; if [ "$CPM_LOCALE" != C.UTF-8 ]; then locale_base=$(printf '%s' "$CPM_LOCALE" | cut -d. -f1); localedef -i "$locale_base" -f UTF-8 "$CPM_LOCALE"; fi
-RUN set -eu; if [ "$(id -g node)" != "$CPM_GID" ]; then groupmod -g "$CPM_GID" node; fi; if [ "$(id -u node)" != "$CPM_UID" ]; then usermod -u "$CPM_UID" -g "$CPM_GID" node; fi; mkdir -p /workspace /home/node/.local; chown -R "$CPM_UID:$CPM_GID" /workspace /home/node
+RUN apt-get update && apt-get install -y --no-install-recommends bubblewrap passwd && rm -rf /var/lib/apt/lists/*
+RUN set -eu; if id node >/dev/null 2>&1; then groupmod -g "$CPM_GID" node; usermod -u "$CPM_UID" -g "$CPM_GID" node; elif id ubuntu >/dev/null 2>&1; then groupmod -n node -g "$CPM_GID" ubuntu; usermod -l node -d /home/node -m -u "$CPM_UID" -g "$CPM_GID" ubuntu; else groupadd -g "$CPM_GID" node; useradd -m -u "$CPM_UID" -g "$CPM_GID" -s /bin/bash node; fi; mkdir -p /workspace /home/node/.local; chown -R "$CPM_UID:$CPM_GID" /workspace /home/node
+COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
+COPY --from=node-runtime /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
+RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm; ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
 COPY cpm /usr/local/bin/cpm
 COPY claude /usr/local/bin/claude
 RUN chmod 755 /usr/local/bin/cpm /usr/local/bin/claude
@@ -27,7 +33,7 @@ ENV HOME=/home/node
 ENV PATH=/home/node/.local/node_modules/.bin:/home/node/.local/bin:/usr/local/bin:/usr/bin:/bin
 USER node
 WORKDIR /workspace
-`;
+`; }
 
 function selfBinary(): string {
 	const override = process.env.CPM_SELF_BINARY;
@@ -204,11 +210,8 @@ export async function ensurePersistentVolumes(): Promise<VolumeRecord> {
 	return record;
 }
 
-export async function ensureContainerImage(config: RuntimeConfig, onOutput?: (line: string) => void): Promise<string> {
+async function imageDefinition(config: RuntimeConfig): Promise<{image: string; binary: string; dockerfile: string; uid: number; gid: number}> {
 	validatedRegion(config);
-	const checks = await inspectContainerPrerequisites();
-	const failed = checks.find(item => item.state === 'FAIL');
-	if (failed) throw new Error(`${failed.name}：${failed.value}。独立容器模式不会回退到宿主文件系统`);
 	if (!config.claudeBin) throw new Error('需要先安装官方 Claude CLI 以构建默认沙箱镜像');
 	await access(config.claudeBin);
 	const binary = selfBinary();
@@ -216,14 +219,48 @@ export async function ensureContainerImage(config: RuntimeConfig, onOutput?: (li
 	const uid = process.getuid?.();
 	const gid = process.getgid?.();
 	if (uid === undefined || gid === undefined || uid === 0) throw new Error('独立容器需要普通 Linux 用户');
-	const fingerprint = createHash('sha256').update(DOCKERFILE).update(config.timezone).update(config.locale)
+	const recipe = imageRecipeForHost(parseOsRelease(await readFile('/etc/os-release', 'utf8')));
+	const dockerfile = dockerfileForBase(recipe.baseImage);
+	const fingerprint = createHash('sha256').update(dockerfile).update(config.timezone).update(config.locale)
 		.update(String(uid)).update(String(gid)).update(await hashFile(binary)).update(await hashFile(config.claudeBin)).digest('hex').slice(0, 20);
 	const image = `cpm-workspace:${VERSION}-${fingerprint}`;
+	return {image, binary, dockerfile, uid, gid};
+}
+
+export async function inspectImageCompatibility(image: string): Promise<CheckItem[]> {
+	const host = await machineFacts();
+	const result = await docker(['run', '--rm', '--pull=never', '--init', '--network', 'none', '--read-only',
+		'--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--security-opt', 'apparmor=docker-default',
+		'--cgroupns', 'private', '--user', `${host.uid}:${host.gid}`, '--hostname', 'cpm-dev',
+		'--mount', 'type=volume,dst=/tmp', '--tmpfs', '/run:rw,nosuid,nodev', '--tmpfs', '/sys:ro,nosuid,nodev,noexec',
+		image, '/usr/local/bin/cpm', '__container-facts']);
+	if (result.code !== 0) return [{name: '宿主镜像对照', state: 'FAIL', value: result.stderr.trim() || `检查容器退出码 ${result.code}`}];
+	let sandbox: MachineFacts;
+	try { sandbox = JSON.parse(result.stdout.trim()) as MachineFacts; }
+	catch { return [{name: '宿主镜像对照', state: 'FAIL', value: '容器返回的系统信息不是 JSON'}]; }
+	return compareMachineFacts(host, sandbox);
+}
+
+export async function inspectCurrentImageCompatibility(config: RuntimeConfig): Promise<CheckItem[]> {
+	try {
+		const {image} = await imageDefinition(config);
+		const exists = await docker(['image', 'inspect', image]);
+		return exists.code === 0 ? inspectImageCompatibility(image) : [{name: '宿主镜像对照', state: 'INFO', value: '当前配置的镜像尚未构建'}];
+	} catch (error) {
+		return [{name: '宿主镜像对照', state: 'INFO', value: (error as Error).message}];
+	}
+}
+
+export async function ensureContainerImage(config: RuntimeConfig, onOutput?: (line: string) => void): Promise<string> {
+	const checks = await inspectContainerPrerequisites();
+	const failed = checks.find(item => item.state === 'FAIL');
+	if (failed) throw new Error(`${failed.name}：${failed.value}。独立容器模式不会回退到宿主文件系统`);
+	const {image, binary, dockerfile, uid, gid} = await imageDefinition(config);
 	const exists = await docker(['image', 'inspect', image]);
 	if (exists.code === 0) return image;
 	const folder = await mkdtemp(join(tmpdir(), 'cpm-container-build-'));
 	try {
-		await writeFile(join(folder, 'Dockerfile'), DOCKERFILE);
+		await writeFile(join(folder, 'Dockerfile'), dockerfile);
 		await copyFile(binary, join(folder, 'cpm'));
 		await copyFile(config.claudeBin, join(folder, 'claude'));
 		const proxy = `http://127.0.0.1:${config.httpPort}`;
@@ -311,6 +348,9 @@ export async function runIsolatedContainer(config: RuntimeConfig, executable: st
 	if (!expectedExitIp) throw new Error('没有经过代理验证的出口 IP，停止启动独立容器');
 	const volumes = await ensurePersistentVolumes();
 	const image = await ensureContainerImage(config);
+	const comparison = await inspectImageCompatibility(image);
+	console.error(`CPM 宿主镜像对照\n${statusSummary({connected: true, checks: comparison})}\n`);
+	if (comparison.some(item => item.state === 'FAIL')) throw new Error('宿主镜像对照未通过，已停止启动目标命令');
 	const directory = await mkdtemp(join(tmpdir(), 'cpm-egress-'));
 	let sidecar: Awaited<ReturnType<typeof startNetworkSidecar>> | undefined;
 	try {

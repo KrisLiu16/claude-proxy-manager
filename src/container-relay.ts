@@ -98,6 +98,12 @@ async function codexLoggedIn(binary: string): Promise<boolean> {
 	});
 }
 
+export function codexLaunchArgs(args: string[]): string[] {
+	if (['login', 'help', '--help', '-h', '--version', '-V'].includes(args[0] || '')) return args;
+	if (args.some(item => item === '--sandbox' || item === '-s' || item.startsWith('--sandbox='))) return args;
+	return ['--sandbox', 'danger-full-access', ...args];
+}
+
 async function runCommand(command: string, args: string[]): Promise<number> {
 	if (command === 'codex') {
 		const binary = '/home/node/.local/node_modules/.bin/codex';
@@ -124,7 +130,9 @@ async function runCommand(command: string, args: string[]): Promise<number> {
 			if (login !== 0) return login;
 		}
 	}
-	return inheritedCommand(command, command === 'claude' ? ['--no-chrome', ...args] : args);
+	const launchArgs = command === 'claude' ? ['--no-chrome', ...args]
+		: command === 'codex' ? codexLaunchArgs(args) : args;
+	return inheritedCommand(command, launchArgs);
 }
 
 export async function runContainerCommand(command: string, args: string[]): Promise<number> {
@@ -150,6 +158,7 @@ export async function runContainerCommand(command: string, args: string[]): Prom
 		checks.push({name: 'no-new-privileges', state: field('NoNewPrivs') === '1' ? 'PASS' : 'FAIL', value: field('NoNewPrivs')});
 		checks.push({name: 'seccomp', state: field('Seccomp') === '2' ? 'PASS' : 'FAIL', value: field('Seccomp')});
 		checks.push({name: 'CPM 资源配置', state: 'INFO', value: '无额外 CPU/内存/cgroup 进程上限；继承宿主 ulimit'});
+		if (command === 'codex' && codexLaunchArgs(args) !== args) checks.push({name: 'Codex 内层隔离', state: 'INFO', value: '默认由 CPM 容器隔离；Codex 可操作整个容器工作区'});
 		const mounts = await readFile('/proc/self/mountinfo', 'utf8');
 		const rootMount = mounts.split('\n').find(line => line.split(' ')[4] === '/')?.split(' ')[5] || '';
 		checks.push({name: '只读根文件系统', state: rootMount.split(',').includes('ro') ? 'PASS' : 'FAIL', value: rootMount});

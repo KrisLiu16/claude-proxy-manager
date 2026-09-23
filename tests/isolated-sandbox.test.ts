@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {containerRunArguments, parseHostUlimits, verifyVolumeIdentity, volumeAction} from '../src/isolated-sandbox.js';
 import {genericTarget, proxyTarget} from '../src/proxy-runtime.js';
+import {codexLaunchArgs} from '../src/container-relay.js';
 
 test('proxy defaults to Claude and accepts Codex or an explicit arbitrary command', () => {
 	assert.deepEqual(proxyTarget([]), {command: 'claude', args: []});
@@ -10,6 +11,10 @@ test('proxy defaults to Claude and accepts Codex or an explicit arbitrary comman
 	assert.deepEqual(proxyTarget(['--', 'python3', '--version']), {command: 'python3', args: ['--version']});
 	assert.deepEqual(genericTarget(['--', 'sh', '-c', 'pwd']), {command: 'sh', args: ['-c', 'pwd']});
 	assert.throws(() => proxyTarget(['--']), /需要指定命令/);
+	assert.deepEqual(codexLaunchArgs([]), ['--sandbox', 'danger-full-access']);
+	assert.deepEqual(codexLaunchArgs(['exec', 'hello']), ['--sandbox', 'danger-full-access', 'exec', 'hello']);
+	assert.deepEqual(codexLaunchArgs(['--sandbox', 'workspace-write']), ['--sandbox', 'workspace-write']);
+	assert.deepEqual(codexLaunchArgs(['login', 'status']), ['login', 'status']);
 });
 
 test('generic container has no host workspace or credentials and no direct network', () => {

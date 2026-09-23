@@ -5,7 +5,8 @@ import {access, chmod, copyFile, mkdir, readFile, rename} from 'node:fs/promises
 import {homedir, arch, platform} from 'node:os';
 import {dirname, join, resolve} from 'node:path';
 import {downloadOfficialClaude, type ClaudePlatform} from './official-claude.js';
-import {ensureContainerImage, ensurePersistentVolumes, inspectContainerPrerequisites, inspectPersistentVolumes, prepareDockerEngine} from './isolated-sandbox.js';
+import {ensureContainerImage, ensurePersistentVolumes, inspectContainerPrerequisites, inspectCurrentImageCompatibility, inspectImageCompatibility, inspectPersistentVolumes, prepareDockerEngine} from './isolated-sandbox.js';
+import {imageRecipeForHost, machineFacts} from './host-baseline.js';
 import {inspectProxyRuntime, readRuntimeConfig, resolveAutomaticEnvironment, stopBridge, type RuntimeConfig} from './proxy-runtime.js';
 import {normalizeNoProxy, parseProxySpec, type CheckItem} from './types.js';
 
@@ -162,9 +163,21 @@ export async function checkLocal(): Promise<CheckItem[]> {
 	let checks: CheckItem[];
 	try { checks = await inspectProxyRuntime('generic'); }
 	catch (error) { checks = [{name: '代理运行时', state: 'FAIL', value: (error as Error).message}]; }
+	const host = await machineFacts();
+	const recipe = imageRecipeForHost(host.os);
+	checks.push({name: '宿主发行版', state: recipe.note ? 'WARN' : 'PASS', value: host.os.prettyName || `${host.os.id} ${host.os.versionId}`, detail: recipe.note || `基础镜像 ${recipe.baseImage.split('@')[0]}`});
 	const docker = await inspectContainerPrerequisites();
 	checks.push(...docker);
 	if (!docker.some(row => row.state === 'FAIL')) checks.push(...await inspectPersistentVolumes());
+	if (!docker.some(row => row.state === 'FAIL')) {
+		try {
+			const config = await readRuntimeConfig();
+			if (config.proxyUrl && config.claudeBin) {
+				const resolution = await resolveAutomaticEnvironment(config, false);
+				if (resolution.geo || config.timezone !== 'auto' && config.locale !== 'auto') checks.push(...await inspectCurrentImageCompatibility(resolution.config));
+			}
+		} catch (error) { checks.push({name: '宿主镜像对照', state: 'INFO', value: (error as Error).message}); }
+	}
 	const {settings} = await readLocalSettings();
 	checks.push({name: 'claude 默认路由', state: settings.replaceClaude ? 'PASS' : 'INFO', value: settings.replaceClaude ? '开启，新 shell 生效' : '关闭'});
 	if (settings.replaceClaude) {
@@ -220,6 +233,10 @@ export async function prepareLocal(report?: ProgressReporter): Promise<string> {
 	const image = await ensureContainerImage({...config, ...resolution.config}, line => {
 		if (line) update(82, `构建镜像：${line.slice(0, 65)}`);
 	});
+	update(95, '逐项对照宿主系统与新镜像');
+	const comparison = await inspectImageCompatibility(image);
+	const mismatch = comparison.find(item => item.state === 'FAIL');
+	if (mismatch) throw new Error(`${mismatch.name}：${mismatch.value}`);
 	update(100, '独立工作区已就绪');
 	return image;
 }

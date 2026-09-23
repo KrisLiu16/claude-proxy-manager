@@ -16,6 +16,8 @@ CPM runs commands on the current Linux machine inside a Docker container with no
 
 On first interactive Codex launch, CPM starts `codex login --device-auth` because browser login's localhost callback cannot reach the isolated container. The user completes the verification in their own browser; device code login must be enabled for the account or workspace. Never collect or relay a device code yourself.
 
+CPM compares the host OS, architecture, kernel, UID/GID, and common tool versions with the image before launching a command. Read warnings as concrete differences; do not assume the entire host filesystem or package set is replicated. Default `cpm proxy codex` disables Codex's inner sandbox because the outer CPM container blocks nested user namespaces. The outer container boundary remains in force. An explicit Codex `--sandbox` argument takes precedence.
+
 The container uses the same persistent `/home/node` and `/workspace` Docker volumes on subsequent runs by the same host user. Each command starts a new container, so background processes, `/tmp`, and changes to the read-only image layer do not persist. The host HOME and project directories are not mounted. Never remove CPM's named volumes as a routine repair step; a missing or replaced volume makes CPM stop to avoid silently presenting an empty workspace.
 
 The whitelist supports comma-separated domains, IP addresses, and CIDR ranges. For a whole domain, include the apex and suffix as needed, for example `naiveai-dev.com,.naiveai-dev.com`. The sidecar still rejects cloud metadata and host loopback targets. A whitelist entry permits a direct connection from the **host sidecar**, so only add destinations the user intends to reach directly.

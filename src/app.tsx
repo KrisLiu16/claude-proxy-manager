@@ -212,6 +212,7 @@ export function App({initial, platform = process.platform, onLaunch}: {initial: 
 			<Text>cpm exec -- git status   在共享 /workspace 执行单条命令</Text>
 			<Text>cpm proxy         启动 Claude；cpm proxy codex 启动 Codex</Text>
 			<Text>Codex 首次登录使用设备码；在浏览器中由你完成验证</Text>
+			<Text>Codex 默认由 CPM 外层隔离；内层 user namespace 在此容器中不可用</Text>
 			<Text>TUI 快捷键 1 / 2 / 3 可直接进入、启动 Claude 或 Codex</Text>
 			<Text>cpm sandbox -- python3 -V   在同一工作区运行其他程序</Text>
 			<Box marginTop={1}><Text dimColor>HOME 和 /workspace 持久；每条命令是新容器，后台进程不会延续。</Text></Box>

@@ -9,6 +9,7 @@ import {readRuntimeConfig, resolvedRuntimeEnvironment, runBridge, runClaudeProxy
 import {ensureContainerImage, ensurePersistentVolumes, prepareDockerEngine} from './isolated-sandbox.js';
 import {runContainerCommand} from './container-relay.js';
 import {VERSION} from './version.js';
+import {machineFacts} from './host-baseline.js';
 
 async function runtimeMode(): Promise<boolean> {
 	const command = process.argv[2];
@@ -32,6 +33,7 @@ async function runtimeMode(): Promise<boolean> {
 		process.exitCode = await runContainerCommand(process.argv[3], process.argv.slice(4));
 		return true;
 	}
+	if (command === '__container-facts') { process.stdout.write(`${JSON.stringify(await machineFacts())}\n`); return true; }
 	if (command === '__container-prepare') {
 		await prepareDockerEngine();
 		const resolved = await resolvedRuntimeEnvironment();
@@ -75,6 +77,7 @@ TUI 快捷键：e 配置，s 准备，c 检查，1 进入，2 Claude，3 Codex�
 
 每次命令会启动新容器；/home/node 与 /workspace 使用同一组具名卷持久保存。
 CPM 不设置 CPU、内存或进程数上限。Codex 首次登录使用设备码流程。
+每次启动会自动对照宿主发行版、内核、架构和常用工具版本；Codex 默认由 CPM 外层容器隔离。
 容器外的宿主代码不会自动出现，请在 /workspace 中克隆仓库。
 隔离降低环境暴露风险，但不能保证抵御内核漏洞或宿主 Docker 管理员。`);
 
