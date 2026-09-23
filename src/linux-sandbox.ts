@@ -2,7 +2,7 @@ import {spawn, type ChildProcess} from 'node:child_process';
 import {createConnection, createServer, type Server, type Socket} from 'node:net';
 import {createSocket, type Socket as DatagramSocket} from 'node:dgram';
 import {randomBytes} from 'node:crypto';
-import {access, chmod, copyFile, lstat, mkdir, mkdtemp, readFile, readlink, readdir, rm, symlink, writeFile} from 'node:fs/promises';
+import {access, chmod, copyFile, lstat, mkdir, mkdtemp, readFile, readlink, readdir, realpath, rm, symlink, writeFile} from 'node:fs/promises';
 import {constants as fsConstants} from 'node:fs';
 import {homedir, hostname, tmpdir} from 'node:os';
 import {lookup} from 'node:dns/promises';
@@ -157,11 +157,35 @@ async function coverEtc(directory: string, timezone: string): Promise<void> {
 	await run('umount', [original]);
 }
 
-async function maskHostFiles(): Promise<void> {
-	for (const path of ['/run', '/var/lib/cloud', '/sys/devices/virtual/dmi', '/sys/firmware/dmi']) {
+async function maskHostFiles(session: Session): Promise<void> {
+	for (const path of ['/run', '/var/lib/cloud', '/etc/cloud', '/sys/devices/virtual/dmi', '/sys/firmware/dmi']) {
 		try {
 			if (!(await lstat(path)).isDirectory()) continue;
 			await mount(['-t', 'tmpfs', '-o', 'mode=0755', 'tmpfs', path]);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+		}
+	}
+	const localeSource = '/run/cpm-locale';
+	const blankSource = '/run/cpm-blank';
+	await writeFile(localeSource, `LANG=${session.env.LANG || 'C'}\n`, {mode: 0o444});
+	await writeFile(blankSource, '', {mode: 0o444});
+	const localeTargets = new Set<string>();
+	for (const path of ['/etc/default/locale', '/etc/locale.conf']) {
+		try {
+			const target = await realpath(path);
+			if (target.startsWith('/etc/') && (await lstat(target)).isFile()) localeTargets.add(target);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+		}
+	}
+	for (const target of localeTargets) await mount(['--bind', localeSource, target]);
+	for (const [target, source] of [
+		['/var/log/cloud-init.log', blankSource],
+		['/var/log/cloud-init-output.log', blankSource],
+	] as const) {
+		try {
+			if ((await lstat(target)).isFile()) await mount(['--bind', source, target]);
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
 		}
@@ -174,7 +198,7 @@ export async function sandboxInit(directory: string): Promise<number> {
 	await mount(['--make-rprivate', '/']);
 	await configureNetwork();
 	await coverEtc(directory, session.timezone);
-	await maskHostFiles();
+	await maskHostFiles(session);
 	await mount(['-t', 'proc', 'proc', '/proc']);
 	await run('hostname', [HOSTNAME]);
 	const self = selfCommand('__sandbox-child', [directory]);
@@ -318,6 +342,9 @@ export async function runInLinuxSandbox(config: RuntimeConfig, args: string[], e
 	await chmod(directory, 0o700);
 	const env = proxyEnvironment(config);
 	for (const name of ['SSH_CONNECTION', 'SSH_CLIENT', 'SSH_TTY', 'CPM_SOCKS5_PROXY', 'SOCKS5_PROXY', 'CPM_PROXY_CONFIG']) delete env[name];
+	env.HOSTNAME = HOSTNAME;
+	if (env.HOST) env.HOST = HOSTNAME;
+	for (const name of ['AWS_REGION', 'AWS_DEFAULT_REGION', 'AZURE_REGION', 'CLOUD_REGION', 'ECS_REGION_ID', 'GOOGLE_CLOUD_REGION', 'TENCENTCLOUD_REGION']) delete env[name];
 	const session: Session = {
 		uid: process.getuid!(), gid: process.getgid!(), groups: process.getgroups!(),
 		cwd: process.cwd(), claudeBin: config.claudeBin, claudeArgs: args,

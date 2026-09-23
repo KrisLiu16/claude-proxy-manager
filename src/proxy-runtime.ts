@@ -629,10 +629,7 @@ export async function inspectProxyRuntime(): Promise<CheckItem[]> {
 	}
 	rows.push(row('DNS 模式', parsed?.protocol === 'socks5h:' ? 'PASS' : 'WARN', parsed?.protocol === 'socks5h:' ? 'SOCKS5H 远端解析' : '非远端解析'));
 	rows.push(row('浏览器集成', 'PASS', '--no-chrome'));
-	try {
-		const direct = await httpsRequest('api.ipify.org', '/');
-		rows.push(row('开发机直连 IP', direct.status === 200 ? 'PASS' : 'WARN', direct.body || `HTTP ${direct.status}`));
-	} catch (error) { rows.push(row('开发机直连 IP', 'WARN', '获取失败', (error as Error).message)); }
+	rows.push(row('开发机直连 IP', 'INFO', '未探测', '启动检查不从宿主机直连外网'));
 	if (parsed) {
 		if (exitIp) {
 			const ip = exitIp;
@@ -686,7 +683,7 @@ export async function runClaudeProxy(args: string[]): Promise<number> {
 	if (resolution.error && (config.timezone === 'auto' || config.locale === 'auto')) {
 		console.error(resolution.geo
 			? `cpm: IP 地理信息实时探测失败，复用上次缓存：${resolution.error}`
-			: `cpm: IP 地理信息探测失败且没有缓存，使用默认时区/语言：${resolution.error}`);
+				: `cpm: IP 地理信息探测失败且没有缓存：${resolution.error}`);
 	}
 	return await runInLinuxSandbox(resolution.config, args, exitIp);
 }
