@@ -12,7 +12,10 @@ test('installer reports Aster-style stages and configures PATH without ANSI when
 	const fakeBin = join(root, 'bin');
 	await mkdir(home, {recursive: true});
 	await mkdir(fakeBin, {recursive: true});
-	const fixture = Buffer.from('#!/bin/sh\necho 9.9.9\n');
+	await mkdir(join(home, '.local', 'bin'), {recursive: true});
+	const stopped = join(root, 'old-bridge-stopped');
+	await writeFile(join(home, '.local', 'bin', 'cpm'), '#!/bin/sh\necho old\n', {mode: 0o755});
+	const fixture = Buffer.from('#!/bin/sh\n[ "$1" = __stop-bridge ] && : > "$CPM_TEST_STOP"\necho 9.9.9\n');
 	const fixturePath = join(root, 'fixture-cpm');
 	await writeFile(fixturePath, fixture, {mode: 0o755});
 	const checksum = createHash('sha256').update(fixture).digest('hex');
@@ -40,6 +43,7 @@ esac
 			CPM_VERSION: 'v9.9.9',
 			CPM_TEST_FIXTURE: fixturePath,
 			CPM_TEST_SHA: checksum,
+			CPM_TEST_STOP: stopped,
 		},
 		encoding: 'utf8',
 	});
@@ -52,5 +56,6 @@ esac
 	const installed = join(home, '.local', 'bin', 'cpm');
 	assert.deepEqual(await readFile(installed), fixture);
 	assert.equal((await stat(installed)).mode & 0o777, 0o755);
+	assert.equal((await stat(stopped)).isFile(), true);
 	assert.match(await readFile(join(home, '.profile'), 'utf8'), /# CPM/);
 });

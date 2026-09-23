@@ -14,7 +14,7 @@ cpm check           # 逐项检查；解决 FAIL 后再使用
 cpm enter           # 在 /workspace 打开交互式 bash
 ```
 
-安装器从 [GitHub Releases](https://github.com/KrisLiu16/claude-proxy-manager/releases) 下载当前平台的 CPM 单文件程序，校验 SHA-256，默认放到 `~/.local/bin/cpm`。`CPM_VERSION=v0.9.1` 可固定版本；`CPM_INSTALL_DIR` 可指定目录。独立容器目前只支持 Linux，且要求 Docker Engine、seccomp、AppArmor 和普通用户。Ubuntu/Debian 缺少 Docker 时，`cpm setup` 会尝试使用免密 sudo 安装并启动它；其他发行版需要先自行安装 Docker。
+安装器从 [GitHub Releases](https://github.com/KrisLiu16/claude-proxy-manager/releases) 下载当前平台的 CPM 单文件程序，校验 SHA-256，默认放到 `~/.local/bin/cpm`。`CPM_VERSION=v0.9.2` 可固定版本；`CPM_INSTALL_DIR` 可指定目录。升级时会先停止旧的宿主代理 bridge，新启动的命令会使用新版本；已经运行的容器不会被中断。独立容器目前只支持 Linux，且要求 Docker Engine、seccomp、AppArmor 和普通用户。Ubuntu/Debian 缺少 Docker 时，`cpm setup` 会尝试使用免密 sudo 安装并启动它；其他发行版需要先自行安装 Docker。
 
 首次构建镜像要下载固定的 Node 基础镜像并安装 Git、Python 等工具，可能需要几分钟。后续同版本、同区域配置和相同 Claude 二进制会复用镜像。已有官方 Claude 二进制会直接复用；缺少时，CPM 从官方 npm 平台包下载并验证 SHA-512，再安装到本机 `~/.local/bin/claude`。Codex 首次运行时会在容器 HOME 中安装，其状态随后持久保存。首次登录 Codex 时，CPM 会启动设备码流程，由用户在自己的浏览器完成验证；隔离容器无法接收普通浏览器流程的 localhost OAuth 回调。设备码登录需要在账户或工作区中启用，详见 [OpenAI Codex 登录说明](https://learn.chatgpt.com/docs/auth)。
 
@@ -90,7 +90,7 @@ Docker 卷名为 `cpm-home-<ID>` 和 `cpm-workspace-<ID>`。`cpm setup` 不会�
 
 ### 与宿主机的差异
 
-容器共用宿主 Linux 内核与 CPU 架构，采用当前用户相同的 UID/GID，并从宿主读取主要 ulimit。当前镜像固定为 Debian 12 + Node.js 24，宿主若是 Ubuntu，其系统包、Python/Git 版本与额外工具可能不同。容器用户名为 `node`，只保留主组；宿主的补充用户组、HOME、SSH 密钥、已安装工具和项目路径不会自动进入。容器主机名固定为 `cpm-dev`，只有回环网卡与受控 DNS，时区和语言按代理出口配置。根文件系统只读；软件应安装在持久的 `/home/node` 或 `/workspace` 中。后台进程随本次命令结束。
+容器共用宿主 Linux 内核与 CPU 架构，采用当前用户相同的 UID/GID，并从宿主读取主要 ulimit。当前镜像固定为 Debian 12 + Node.js 24，宿主若是 Ubuntu，其系统包、Python/Git 版本与额外工具可能不同。容器用户名为 `node`，只保留主组；宿主的补充用户组、HOME、SSH 密钥、已安装工具和项目路径不会自动进入。容器主机名固定为 `cpm-dev`，只有回环网卡与受控 DNS，时区和语言按代理出口配置。CPM 只传入运行所需的代理、时区、语言、终端变量和 `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`；运行 Claude 时加 `--no-chrome`。根文件系统只读；软件应安装在持久的 `/home/node` 或 `/workspace` 中。后台进程随本次命令结束。`/run` 由 Docker tmpfs 提供，默认容量可能与宿主 `/run` 不同。
 
 这些差异是隔离边界的一部分。CPM 不设 CPU、内存或 cgroup 进程配额，但 Docker 守护进程、父 cgroup 与主机策略仍可能设置约束；可用 `docker inspect <正在运行的 cpm-run 容器>` 检查实际值。
 

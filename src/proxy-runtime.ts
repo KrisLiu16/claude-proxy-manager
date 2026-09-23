@@ -406,12 +406,20 @@ function relaunchArgs(command: string, args: string[]): {executable: string; arg
 }
 
 export async function stopBridge(port = DEFAULT_PORT): Promise<void> {
+	let signaledPid = 0;
 	try {
-		const stored = (await readFile(pidPath(port), 'utf8')).trim();
-		const pid = stored.startsWith('{') ? Number((JSON.parse(stored) as {pid?: number}).pid) : Number(stored);
-		if (Number.isInteger(pid) && processAlive(pid)) process.kill(pid, 'SIGTERM');
+		const stored = JSON.parse(await readFile(pidPath(port), 'utf8')) as {pid?: number; token?: string};
+		if (Number.isInteger(stored.pid) && stored.token && processAlive(stored.pid!) && await bridgeHealthy(port, stored.token)) {
+			process.kill(stored.pid!, 'SIGTERM');
+			signaledPid = stored.pid!;
+		}
 	} catch {}
 	await rm(pidPath(port), {force: true});
+	if (signaledPid) {
+		for (let attempt = 0; attempt < 30 && (processAlive(signaledPid) || await portOpen(port)); attempt++) {
+			await new Promise(resolve => setTimeout(resolve, 100));
+		}
+	}
 }
 
 export async function ensureBridge(config: RuntimeConfig): Promise<void> {

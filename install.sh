@@ -130,6 +130,9 @@ if [ "$(uname -s)" = Darwin ] && ! codesign -v "$TMP" >/dev/null 2>&1; then
   codesign --force --sign - "$TMP" >/dev/null 2>&1 || true
   tick "签名" "已就地重新签名"
 fi
+if [ -x "$BIN_DIR/cpm" ]; then
+  "$TMP" __stop-bridge >/dev/null 2>&1 || true
+fi
 mv "$TMP" "$BIN_DIR/cpm"
 tick "安装" "$(short "$BIN_DIR/cpm")"
 
